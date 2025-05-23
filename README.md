@@ -45,10 +45,54 @@
 
 ## 使用说明
 
+### 依赖环境
+
+以下版本在作者环境中验证通过：
+
+- Python 3.10
+- PyTorch 2.0.1
+- PyTorch-Geometric 2.3.1
+- NetworkX 3.1
+- Geopy 2.3.0
+- Matplotlib 3.7.1
+
 1. 推荐使用提供的一键脚本：`./run.sh`。脚本会自动安装依赖并执行训练，可将自然语言描述作为参数传入：
    `./run.sh --nl "希望房子便宜并靠近学校"`
 2. 若已安装好依赖，也可直接运行：`python train.py`
 3. 训练完成后可在命令行查看推荐结果或在生成的日志中获取模型指标。
+
+### 复现论文中的对比实验
+
+使用 `experiments.py` 可以分别运行加权排序(`weighted`)、仅进化(`evolution`)、仅强化学习(`rl`)以及混合方法(`hybrid`)四种模式：
+
+```bash
+python experiments.py weighted
+python experiments.py evolution
+python experiments.py rl
+python experiments.py hybrid
+```
+其中 `evolution` 和 `hybrid` 模式会在当前目录生成 `*_pareto.json` 及对应的 PNG 图像，用于展示帕累托前沿。
+
+### 实时交互演示
+
+`interactive_demo.py` 可以读取 `adjust_order.json` 中的自然语言描述或通过 `--nl` 直接指定描述，自动更新偏好并重新输出推荐结果：
+
+```bash
+python interactive_demo.py --nl "希望房子更大并靠近医院"
+```
+
+### 测试评估
+
+使用 `evaluation.py` 可一次性运行四种方法并生成评测指标及训练曲线到指定目录：
+
+```bash
+python evaluation.py --out eval_plots
+```
+
+
+### English Overview
+
+This repository implements a multi-objective real estate recommender combining GNN, reinforcement learning and evolutionary search. Use `run.sh` or `python train.py` to train the full pipeline. `experiments.py` reproduces ablation studies and exports Pareto front data for visualization. `interactive_demo.py` demonstrates dynamic preference updating via natural language.
 
 ## 数据来源与授权
 
