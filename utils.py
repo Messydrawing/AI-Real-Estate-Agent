@@ -148,11 +148,14 @@ def calculate_score(house: dict, criteria: dict, weights: dict) -> float:
         elif key in ['hospital_nearby', 'school_nearby']:
             if not criteria.get(key, False):
                 continue
-            dist = house.get('distance_to_nearest_hospital' if key == 'hospital_nearby' else 'distance_to_nearest_school', float('inf'))
-            if dist == float('inf') or dist >= 5.0:
+            dist = house.get(
+                'distance_to_nearest_hospital' if key == 'hospital_nearby' else 'distance_to_nearest_school',
+                float('inf'))
+            max_d = criteria.get(f'{key}_max_distance', 10.0)
+            if dist == float('inf'):
                 attr_score = 0.0
             else:
-                attr_score = max(0.0, (1 - dist / 5.0)) * 100.0
+                attr_score = max(0.0, 1 - dist / max_d) * 100.0
             score += attr_score * weight
     return score
 
