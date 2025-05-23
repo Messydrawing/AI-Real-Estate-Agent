@@ -104,8 +104,11 @@ class RLRanker:
         self.weights = preferences.get('weights', {})
         self.agent = DQNAgent(state_dim)
 
-    def train(self, houses: List[dict], episodes: int = 50):
-        for _ in range(episodes):
+    def train(self, houses: List[dict], episodes: int = 50, verbose: bool = False) -> list:
+        """训练 DQN 并返回每个 episode 的累积奖励"""
+        episode_rewards = []
+        for ep in range(episodes):
+            total = 0.0
             random.shuffle(houses)
             for i, house in enumerate(houses):
                 state = torch.tensor(house['embedding'], dtype=torch.float)
@@ -115,6 +118,11 @@ class RLRanker:
                 next_state = torch.tensor(houses[(i + 1) % len(houses)]['embedding'], dtype=torch.float)
                 self.agent.store(state, action, reward, next_state, float(done))
                 self.agent.train_step()
+                total += reward
+            episode_rewards.append(total)
+            if verbose:
+                print(f'Episode {ep + 1}: reward={total:.2f}')
+        return episode_rewards
 
     def rank(self, houses: List[dict]) -> List[dict]:
         scored = []
