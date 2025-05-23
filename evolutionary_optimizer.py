@@ -1,4 +1,7 @@
 import random
+import json
+
+import matplotlib.pyplot as plt
 
 
 class EvolutionaryOptimizer:
@@ -95,8 +98,34 @@ class EvolutionaryOptimizer:
         moead = self.optimize_moead(houses, population_size)
         return self.find_pareto_front(nsga + moead)
 
+    def export_front_points(self, front: list, path: str = 'pareto_points.json', plot: bool = True) -> list:
+        """保存帕累托前沿解集各目标取值，并可绘制前两目标散点图"""
+        points = []
+        for h in front:
+            pt = []
+            for k in self.objective_keys:
+                pt.append(h.get(k, float('inf')))
+            points.append(pt)
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump({'objectives': self.objective_keys, 'points': points}, f, ensure_ascii=False, indent=4)
+        if plot and len(self.objective_keys) >= 2 and points:
+            x, y = zip(*[(p[0], p[1]) for p in points])
+            plt.figure()
+            plt.scatter(x, y)
+            plt.xlabel(self.objective_keys[0])
+            plt.ylabel(self.objective_keys[1])
+            plt.tight_layout()
+            img_path = path.replace('.json', '.png')
+            plt.savefig(img_path)
+        return points
 
-def optimize_with_hybrid(houses: list, criteria: dict, generations: int = 50, population_size: int = 20) -> list:
+
+def optimize_with_hybrid(houses: list, criteria: dict, generations: int = 50, population_size: int = 20,
+                         save_pareto_path: str | None = None) -> list:
+    """运行混合进化算法，可选地保存帕累托前沿数据/图"""
     optimizer = EvolutionaryOptimizer(criteria)
-    return optimizer.optimize_hybrid(houses, generations, population_size)
+    front = optimizer.optimize_hybrid(houses, generations, population_size)
+    if save_pareto_path:
+        optimizer.export_front_points(front, save_pareto_path)
+    return front
 
