@@ -1,14 +1,26 @@
+import argparse
 import json
 from pprint import pprint
 
-from data_loader import load_data
+from data_loader import load_data, load_user_preferences, load_criteria
 from graph_builder import build_graph
 from gnn_model import train_gnn
 from evolutionary_optimizer import optimize_with_hybrid
 from rl_agent import RLRanker
+from utils import parse_natural_language, apply_adjustments, calculate_score
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Train real estate recommender")
+    parser.add_argument('--nl', type=str, help='\u81ea\u7136\u8bed\u8a00\u504f\u597d\u63cf\u8ff0')
+    args = parser.parse_args()
+
+    if args.nl:
+        prefs = load_user_preferences('user_preferences.json')
+        crit = load_criteria('updated_criteria.json')
+        adj = parse_natural_language(args.nl)
+        apply_adjustments(crit, prefs, adj)
+
     houses, schools, hospitals, preferences, criteria = load_data(
         'updated_houses_with_price_history.json',
         'facilities.geojson',
