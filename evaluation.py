@@ -2,7 +2,9 @@ import os
 import json
 import math
 import argparse
+import numpy as np
 import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 
 from data_loader import load_data
 from utils import calculate_score, rank_properties
@@ -52,6 +54,80 @@ def prepare_simple_embeddings(houses):
     for h in houses:
         h['embedding'] = [h.get('price_norm', 0.0), h.get('bedrooms_norm', 0.0),
                           h.get('bathrooms_norm', 0.0), h.get('area_norm', 0.0)]
+
+
+def pareto_coverage(ref, cand, criteria):
+    """Coverage of cand by ref (ratio of solutions in cand dominated by ref)."""
+    opt = EvolutionaryOptimizer(criteria)
+    if not cand:
+        return 0.0
+    covered = 0
+    for b in cand:
+        for a in ref:
+            if opt.dominates(a, b) or opt.evaluate_objectives(a) == opt.evaluate_objectives(b):
+                covered += 1
+                break
+    return covered / len(cand)
+
+
+def attribute_scores(house, criteria):
+    keys = ['price', 'bedrooms', 'bathrooms', 'area']
+    if 'house_type' in criteria:
+        keys.append('house_type')
+    if criteria.get('hospital_nearby'):
+        keys.append('hospital_nearby')
+    if criteria.get('school_nearby'):
+        keys.append('school_nearby')
+    scores = {}
+    for k in keys:
+        score = calculate_score(house, {k: criteria.get(k)}, {k: 1.0})
+        scores[k] = score
+    return scores
+
+
+def plot_radar(scores, path):
+    labels = list(scores.keys())
+    values = list(scores.values())
+    angles = np.linspace(0, 2 * np.pi, len(labels), endpoint=False).tolist()
+    values += values[:1]
+    angles += angles[:1]
+    fig = plt.figure()
+    ax = fig.add_subplot(111, polar=True)
+    ax.plot(angles, values, 'o-', linewidth=2)
+    ax.fill(angles, values, alpha=0.25)
+    ax.set_thetagrids([a * 180 / np.pi for a in angles[:-1]], labels)
+    ax.set_ylim(0, 100)
+    plt.tight_layout()
+    plt.savefig(path)
+    plt.close()
+
+
+def plot_metric_bars(metrics, metric_key, path):
+    names = list(metrics.keys())
+    vals = [metrics[n][metric_key] for n in names]
+    plt.figure()
+    plt.bar(names, vals)
+    plt.ylabel(metric_key.upper())
+    plt.tight_layout()
+    plt.savefig(path)
+    plt.close()
+
+
+def plot_pareto_3d(front, obj_keys, path):
+    if len(obj_keys) < 3 or not front:
+        return
+    xs = [h.get(obj_keys[0], 0.0) for h in front]
+    ys = [h.get(obj_keys[1], 0.0) for h in front]
+    zs = [h.get(obj_keys[2], 0.0) for h in front]
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+    ax.scatter(xs, ys, zs)
+    ax.set_xlabel(obj_keys[0])
+    ax.set_ylabel(obj_keys[1])
+    ax.set_zlabel(obj_keys[2])
+    plt.tight_layout()
+    plt.savefig(path)
+    plt.close()
 
 
 def run_evaluation(output_dir):
@@ -109,6 +185,28 @@ def run_evaluation(output_dir):
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, 'hybrid_hv.png'))
 
+    # Additional metrics
+    hv_w = evo.compute_hypervolume(weighted_ranked[:20])
+    hv_rl = evo.compute_hypervolume(rl_ranked[:20])
+    hv_nsga = evo.compute_hypervolume(nsga_front)
+    hv_hybrid = evo.compute_hypervolume(hybrid_front)
+
+    coverage_hybrid = pareto_coverage(hybrid_front, nsga_front, criteria)
+    coverage_nsga = pareto_coverage(nsga_front, hybrid_front, criteria)
+
+    plot_pareto_3d(nsga_front, evo.objective_keys,
+                   os.path.join(output_dir, 'nsga_pareto3d.png'))
+    plot_pareto_3d(hybrid_front, evo.objective_keys,
+                   os.path.join(output_dir, 'hybrid_pareto3d.png'))
+
+    for name, ranked in [('weighted', weighted_ranked),
+                         ('rl_no_gnn', rl_ranked),
+                         ('nsga2', nsga_front),
+                         ('hybrid', hybrid_front)]:
+        if ranked:
+            scores = attribute_scores(ranked[0], criteria)
+            plot_radar(scores, os.path.join(output_dir, f'{name}_radar.png'))
+
     plt.figure()
     plt.plot(rewards_hybrid)
     plt.xlabel('Episode')
@@ -117,11 +215,17 @@ def run_evaluation(output_dir):
     plt.savefig(os.path.join(output_dir, 'hybrid_rewards.png'))
 
     metrics = {
-        'weighted': {'ndcg': ndcg_w, 'map': map_w},
-        'rl_no_gnn': {'ndcg': ndcg_rl, 'map': map_rl},
-        'nsga2': {'ndcg': ndcg_nsga, 'map': map_nsga},
-        'hybrid': {'ndcg': ndcg_hybrid, 'map': map_hybrid}
+        'weighted': {'ndcg': ndcg_w, 'map': map_w, 'hv': hv_w},
+        'rl_no_gnn': {'ndcg': ndcg_rl, 'map': map_rl, 'hv': hv_rl},
+        'nsga2': {'ndcg': ndcg_nsga, 'map': map_nsga, 'hv': hv_nsga},
+        'hybrid': {'ndcg': ndcg_hybrid, 'map': map_hybrid, 'hv': hv_hybrid}
     }
+    plot_metric_bars(metrics, 'ndcg', os.path.join(output_dir, 'ndcg_bar.png'))
+    plot_metric_bars(metrics, 'map', os.path.join(output_dir, 'map_bar.png'))
+    plot_metric_bars(metrics, 'hv', os.path.join(output_dir, 'hv_bar.png'))
+
+    with open(os.path.join(output_dir, 'coverage.json'), 'w', encoding='utf-8') as f:
+        json.dump({'hybrid_vs_nsga': coverage_hybrid, 'nsga_vs_hybrid': coverage_nsga}, f, ensure_ascii=False, indent=4)
     with open(os.path.join(output_dir, 'metrics.json'), 'w', encoding='utf-8') as f:
         json.dump(metrics, f, ensure_ascii=False, indent=4)
 
