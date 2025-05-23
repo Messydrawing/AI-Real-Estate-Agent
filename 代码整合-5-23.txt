@@ -1,0 +1,969 @@
+该项目将包括：
+
+* GNN图神经网络编码模块，用于提取房产与设施关系嵌入
+* DQN深度强化学习模块，用于训练推荐策略
+* 完整的多目标优化框架与进化算子支持
+* 与现有数据加载、图构建模块集成对接
+
+# 多目标房产推荐系统 模块代码
+
+以下提供完整的Python代码结构，包含数据加载、图构建、GNN表示学习、DQN训练（强化学习排序策略）以及协同进化多目标优化模块。各模块以独立的文件形式呈现
+
+## data\_loader.py
+
+```python
+import json
+from geopy.distance import geodesic
+from utils import compute_statistics, normalize_features
+
+DEFAULT_DISTANCE_THRESHOLD = 5.0  # 公里距离阈值
+
+def load_user_preferences(preferences_file: str) -> dict:
+    """加载用户偏好设置（权重等）JSON文件。"""
+    with open(preferences_file, 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+def load_criteria(criteria_file: str) -> dict:
+    """加载房源筛选条件JSON文件。"""
+    with open(criteria_file, 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+def load_houses(houses_file: str) -> list:
+    """
+    加载房源列表，并为每个房源添加唯一ID字段。
+    将 house_size 重命名为 area 方便处理。
+    """
+    with open(houses_file, 'r', encoding='utf-8') as f:
+        houses = json.load(f)
+    for idx, house in enumerate(houses):
+        house['id'] = idx  # 分配唯一ID
+        if 'house_size' in house:  # 统一字段名称
+            house['area'] = house.pop('house_size')
+    return houses
+
+def load_facilities(facilities_file: str) -> tuple:
+    """
+    从GeoJSON文件中加载设施列表。
+    提取学校和医院的 (lat, lon) 坐标列表分别返回。
+    """
+    with open(facilities_file, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    schools, hospitals = [], []
+    for feature in data.get("features", []):
+        props = feature.get("properties", {})
+        amenity = str(props.get("amenity", "")).lower()
+        coords = feature.get("geometry", {}).get("coordinates", [])
+        if len(coords) == 2:
+            lon, lat = coords
+            # 验证坐标范围合法
+            if -90 <= lat <= 90 and -180 <= lon <= 180:
+                if amenity == "school":
+                    schools.append((lat, lon))
+                elif amenity == "hospital":
+                    hospitals.append((lat, lon))
+    return schools, hospitals
+
+def filter_houses(houses: list, criteria: dict,
+                  schools: list = None, hospitals: list = None,
+                  distance_threshold: float = DEFAULT_DISTANCE_THRESHOLD) -> list:
+    """
+    根据用户筛选条件过滤房源列表。
+    1) 将 price/bedrooms/bathrooms/area 等字段转换为数值型；
+    2) 按照筛选条件对数值范围和房屋类型进行硬过滤；
+    3) 如果需要考虑附近设施条件，则计算每个房源到最近学校/医院的距离并进行二次过滤。
+    返回满足条件的房源列表。
+    """
+    filtered = []
+    for house in houses:
+        # 数值字段类型转换
+        try:
+            if house.get("price") is not None:
+                house["price"] = float(house["price"])
+            if house.get("bedrooms") is not None:
+                house["bedrooms"] = int(float(house["bedrooms"]))
+            if house.get("bathrooms") is not None:
+                house["bathrooms"] = int(float(house["bathrooms"]))
+            if house.get("area") is not None:
+                house["area"] = float(house["area"])
+        except (ValueError, TypeError):
+            continue  # 转换失败的跳过该房源
+
+        # 按数值范围过滤
+        if "price" in criteria and isinstance(criteria["price"], list):
+            p = house.get("price")
+            if p is None or p < criteria["price"][0] or p > criteria["price"][1]:
+                continue
+        if "bedrooms" in criteria and isinstance(criteria["bedrooms"], list):
+            br = house.get("bedrooms")
+            if br is None or br < criteria["bedrooms"][0] or br > criteria["bedrooms"][1]:
+                continue
+        if "bathrooms" in criteria and isinstance(criteria["bathrooms"], list):
+            ba = house.get("bathrooms")
+            if ba is None or ba < criteria["bathrooms"][0] or ba > criteria["bathrooms"][1]:
+                continue
+        if "area" in criteria and isinstance(criteria["area"], list):
+            a = house.get("area")
+            if a is None or a < criteria["area"][0] or a > criteria["area"][1]:
+                continue
+        if criteria.get("house_type"):
+            # 房屋类型（字符串包含关系）过滤
+            if criteria["house_type"].lower() not in str(house.get("house_type", "")).lower():
+                continue
+
+        filtered.append(house)
+    # 如果不要求附近设施，则直接返回过滤结果
+    need_hosp = criteria.get("hospital_nearby", False)
+    need_sch = criteria.get("school_nearby", False)
+    if not (need_hosp or need_sch):
+        return filtered
+
+    # 含附近设施条件的二次过滤：计算每个房源到最近医院/学校的距离
+    schools = schools or []
+    hospitals = hospitals or []
+    second_pass = []
+    for house in filtered:
+        coords = house.get("coordinates")
+        if not coords or len(coords) != 2:
+            continue  # 没有坐标无法计算距离，跳过
+        lat, lon = coords
+        # 最近医院距离
+        if need_hosp:
+            d_h = min((geodesic((lat, lon), s).kilometers for s in hospitals), default=float('inf'))
+            house["distance_to_nearest_hospital"] = d_h
+            if d_h > distance_threshold:
+                continue  # 超出距离阈值，淘汰
+        # 最近学校距离
+        if need_sch:
+            d_s = min((geodesic((lat, lon), s).kilometers for s in schools), default=float('inf'))
+            house["distance_to_nearest_school"] = d_s
+            if d_s > distance_threshold:
+                continue
+        second_pass.append(house)
+    return second_pass
+
+def load_data(houses_file: str, facilities_file: str,
+              preferences_file: str, criteria_file: str) -> tuple:
+    """
+    加载房产数据、设施数据和用户偏好数据，并应用预处理和筛选。
+    返回 (filtered_houses, schools, hospitals, preferences, criteria) 元组。
+    """
+    # 加载各数据源
+    preferences = load_user_preferences(preferences_file)
+    criteria = load_criteria(criteria_file)
+    houses = load_houses(houses_file)
+    schools, hospitals = load_facilities(facilities_file)
+    # 过滤房源并添加距离信息
+    houses = filter_houses(houses, criteria, schools, hospitals)
+    # 计算统计信息并归一化特征
+    stats = compute_statistics(houses)
+    normalize_features(houses, stats)
+    return houses, schools, hospitals, preferences, criteria
+```
+
+## graph\_builder.py
+
+```python
+import networkx as nx
+from geopy.distance import geodesic
+
+def build_graph(houses: list, schools: list, hospitals: list, distance_threshold: float = 5.0) -> nx.Graph:
+    """
+    构建房产-设施异构图。节点包括房产节点和设施节点（学校、医院），
+    边连接房产与其附近一定范围内的学校/医院。
+    返回一个NetworkX无向图对象，其中节点属性包含类型和特征，边属性包含距离权重。
+    """
+    G = nx.Graph()
+    # 添加房产节点及属性
+    for house in houses:
+        node_id = f"house_{house['id']}"  # 房产节点ID前缀
+        # 房产节点特征（包含原始值和归一化值）
+        features = {
+            "node_type": "house",
+            "price": house.get("price"),
+            "bedrooms": house.get("bedrooms"),
+            "bathrooms": house.get("bathrooms"),
+            "area": house.get("area"),
+            "price_norm": house.get("price_norm", 0.0),
+            "bedrooms_norm": house.get("bedrooms_norm", 0.0),
+            "bathrooms_norm": house.get("bathrooms_norm", 0.0),
+            "area_norm": house.get("area_norm", 0.0),
+            "house_type": house.get("house_type"),
+            "coordinates": house.get("coordinates")
+        }
+        G.add_node(node_id, **features)
+    # 添加学校设施节点
+    for idx, (lat, lon) in enumerate(schools):
+        node_id = f"school_{idx}"
+        G.add_node(node_id, node_type="facility", facility_type="school", coordinates=(lat, lon))
+    # 添加医院设施节点
+    for idx, (lat, lon) in enumerate(hospitals):
+        node_id = f"hospital_{idx}"
+        G.add_node(node_id, node_type="facility", facility_type="hospital", coordinates=(lat, lon))
+    # 添加房产-设施边（根据距离阈值）
+    for house in houses:
+        if not house.get("coordinates"):
+            continue
+        house_node = f"house_{house['id']}"
+        lat, lon = house["coordinates"]
+        # 连接范围内的学校节点
+        for idx, (s_lat, s_lon) in enumerate(schools):
+            dist = geodesic((lat, lon), (s_lat, s_lon)).kilometers
+            if dist <= distance_threshold:
+                school_node = f"school_{idx}"
+                G.add_edge(house_node, school_node, distance=dist)
+        # 连接范围内的医院节点
+        for idx, (h_lat, h_lon) in enumerate(hospitals):
+            dist = geodesic((lat, lon), (h_lat, h_lon)).kilometers
+            if dist <= distance_threshold:
+                hospital_node = f"hospital_{idx}"
+                G.add_edge(house_node, hospital_node, distance=dist)
+    return G
+```
+
+## gnn\_model.py
+
+```python
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch_geometric.nn import GCNConv
+
+class HouseGCN(nn.Module):
+    """房产异构图的GCN模型，输出每个节点的嵌入表示向量。"""
+    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int):
+        super(HouseGCN, self).__init__()
+        self.conv1 = GCNConv(input_dim, hidden_dim)
+        self.conv2 = GCNConv(hidden_dim, output_dim)
+
+    def forward(self, x, edge_index):
+        # 两层GCN，将邻居特征聚合
+        x = self.conv1(x, edge_index).relu()
+        x = self.conv2(x, edge_index)
+        return x
+
+def train_gnn(graph, embedding_dim: int = 16, epochs: int = 100) -> list:
+    """
+    在给定房产-设施图上训练GCN模型，输出节点嵌入。
+    :param graph: NetworkX图对象，包含房产和设施节点。
+    :param embedding_dim: 要输出的嵌入向量维度。
+    :param epochs: 训练的迭代轮数。
+    :return: 列表形式的节点嵌入，其中索引0..house_count-1对应每个房产节点的嵌入向量。
+    """
+    # 准备节点索引和特征矩阵
+    # 计算房产和设施节点数量
+    house_ids = [int(n.split('_')[1]) for n, data in graph.nodes(data=True) if data.get("node_type") == "house"]
+    if house_ids:
+        house_count = max(house_ids) + 1  # 房源节点总数（用最大ID+1，包括可能的间断ID）
+    else:
+        house_count = 0
+    school_nodes = [n for n, data in graph.nodes(data=True) if data.get("facility_type") == "school"]
+    hospital_nodes = [n for n, data in graph.nodes(data=True) if data.get("facility_type") == "hospital"]
+    school_count = len(school_nodes)
+    hospital_count = len(hospital_nodes)
+    total_nodes = house_count + school_count + hospital_count
+
+    # 构造特征矩阵（维度6：4个数值特征 + 2个设施类型指示）
+    features = torch.zeros((total_nodes, 6), dtype=torch.float)
+    for n, data in graph.nodes(data=True):
+        # 根据节点类型填充特征
+        if data.get("node_type") == "house":
+            hid = int(n.split('_')[1])
+            # 使用归一化的数值特征
+            features[hid, 0] = float(data.get("price_norm", 0.0))
+            features[hid, 1] = float(data.get("bedrooms_norm", 0.0))
+            features[hid, 2] = float(data.get("bathrooms_norm", 0.0))
+            features[hid, 3] = float(data.get("area_norm", 0.0))
+            # 最后两维留为0（房产节点的设施类型指示为0）
+        else:
+            # 设施节点特征：用最后两维表示类型，其余为0
+            if data.get("facility_type") == "school":
+                # 学校节点索引 = house_count + index
+                idx = house_count + int(n.split('_')[1])
+                features[idx, 4] = 1.0  # 学校
+            elif data.get("facility_type") == "hospital":
+                idx = house_count + school_count + int(n.split('_')[1])
+                features[idx, 5] = 1.0  # 医院
+
+    # 构建边索引（Edge Index）张量
+    edges = []
+    for u, v in graph.edges():
+        # 解析节点ID并转换为索引
+        if u.startswith("house") and v.startswith("house"):
+            # 理论上不会出现房产-房产边
+            continue
+        # 确保u为房产节点，v为设施节点（交换顺序不影响无向图）
+        if u.startswith("house") and v.startswith(("school", "hospital")):
+            house_node = u
+            fac_node = v
+        elif v.startswith("house") and u.startswith(("school", "hospital")):
+            house_node = v
+            fac_node = u
+        else:
+            continue  # 跳过无关边
+        hid = int(house_node.split('_')[1])
+        if fac_node.startswith("school"):
+            fid = house_count + int(fac_node.split('_')[1])
+        else:  # hospital
+            fid = house_count + school_count + int(fac_node.split('_')[1])
+        # 添加双向边
+        edges.append([hid, fid])
+        edges.append([fid, hid])
+    if edges:
+        edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
+    else:
+        edge_index = torch.empty((2, 0), dtype=torch.long)
+
+    # 初始化模型和优化器
+    input_dim = features.size(1)
+    model = HouseGCN(input_dim=input_dim, hidden_dim=16, output_dim=embedding_dim)
+    optimizer = optim.Adam(model.parameters(), lr=0.01)
+    model.train()
+    # 训练GCN模型（使用链接预测的自监督目标，例如重构邻接）
+    for epoch in range(epochs):
+        optimizer.zero_grad()
+        # 前向传播得到所有节点的嵌入表示
+        embeddings = model(features, edge_index)
+        # 简单的链接预测损失：正例边的内积应接近1，负例应接近0
+        pos_scores = []
+        neg_scores = []
+        # 构造正例和负例
+        # 正例：现有的房产-设施边
+        for u, v in graph.edges():
+            if u.startswith("house"):
+                hid = int(u.split('_')[1]); fid = v
+            else:
+                hid = int(v.split('_')[1]); fid = u
+            # 转换fid为全局索引
+            if fid.startswith("school"):
+                fid_index = house_count + int(fid.split('_')[1])
+            else:  # hospital
+                fid_index = house_count + school_count + int(fid.split('_')[1])
+            # 计算正例得分（sigmoid内积）
+            score = torch.sigmoid((embeddings[hid] * embeddings[fid_index]).sum())
+            pos_scores.append(score)
+        # 负例：随机采样同数量的未连接房产-设施对
+        import random
+        all_house_indices = [int(n.split('_')[1]) for n in graph.nodes() if n.startswith("house")]
+        for _ in range(len(graph.edges())):
+            if not all_house_indices or (school_count + hospital_count) == 0:
+                break
+            hid = random.choice(all_house_indices)
+            # 随机选择一个设施节点索引
+            fid_index = house_count + random.randrange(school_count + hospital_count)
+            # 检查是否存在边，如不存在则作为负例
+            if not ( (f"house_{hid}", f"school_{fid_index - house_count}") in graph.edges() or 
+                     (f"house_{hid}", f"hospital_{fid_index - house_count - school_count}") in graph.edges() ):
+                score = torch.sigmoid((embeddings[hid] * embeddings[fid_index]).sum())
+                neg_scores.append(score)
+        if not pos_scores:
+            # 无边的情况，无需训练
+            break
+        # 计算二分类交叉熵损失
+        if neg_scores:
+            pos_scores_tensor = torch.stack(pos_scores)
+            neg_scores_tensor = torch.stack(neg_scores)
+            loss_pos = - (pos_scores_tensor.log().mean())
+            loss_neg = - ((1 - neg_scores_tensor).log().mean())
+            loss = loss_pos + loss_neg
+        else:
+            # 没有负例（几乎不可能发生），则跳过
+            loss = - (torch.stack(pos_scores).log().mean())
+        loss.backward()
+        optimizer.step()
+    # 模型训练完毕，获取最终的节点嵌入
+    model.eval()
+    with torch.no_grad():
+        final_embeddings = model(features, edge_index).cpu().numpy()
+    # 提取房产节点部分的嵌入向量列表
+    house_embeddings = []
+    for i in range(house_count):
+        if i < final_embeddings.shape[0]:
+            house_embeddings.append(final_embeddings[i].tolist())
+        else:
+            house_embeddings.append([0.0] * embedding_dim)
+    return house_embeddings
+```
+
+## rl\_agent.py
+
+```python
+import random
+from utils import calculate_score
+
+class RLRanker:
+    """
+    基于强化学习的房产排序模块。
+    使用简单的Q-learning思想，根据用户反馈动态调整房产评分。
+    """
+    def __init__(self, criteria: dict, preferences: dict, epsilon: float = None,
+                 alpha: float = 0.1, gamma: float = 0.9):
+        """
+        初始化RL排序器。
+        :param criteria: 当前筛选条件字典
+        :param preferences: 用户偏好参数字典，包括各属性权重和可选的epsilon值
+        :param epsilon: 探索概率（不提供则使用preferences中的epsilon或默认0.1）
+        :param alpha: 学习率
+        :param gamma: 折扣因子（此处简化场景可设0.9）
+        """
+        self.criteria = criteria
+        # 提取用户偏好权重
+        self.weights = preferences.get("weights", {})
+        # 设置epsilon（优先使用传入值，否则从偏好中获取，没有则默认0.1）
+        self.epsilon = epsilon if epsilon is not None else preferences.get("epsilon", 0.1)
+        self.alpha = alpha
+        self.gamma = gamma
+        # 初始化Q表：以房产ID为键，初始Q值为根据当前权重计算的静态评分
+        self.Q = {}  # {house_id: Q-value}
+        # 注意：需要在 rank_properties 前已加载houses列表，Q表会在第一次排名时填充
+
+    def rank_properties(self, houses: list) -> list:
+        """
+        使用 epsilon-greedy 策略对房产列表进行排序。
+        返回按策略选择顺序排列的房产列表（从最优到次优）。
+        """
+        ranked_list = []
+        remaining = houses.copy()
+        # 确保Q表包含当前列表中的所有房产
+        for house in remaining:
+            hid = house['id']
+            if hid not in self.Q:
+                # 新房源初始化Q值为基于当前权重的综合评分
+                initial_score = calculate_score(house, self.criteria, self.weights)
+                self.Q[hid] = initial_score
+        # 逐步选出排名
+        while remaining:
+            # epsilon-贪心选择下一个房产
+            if random.random() < self.epsilon:
+                # 探索：随机选择一个房产
+                choice = random.choice(remaining)
+            else:
+                # 利用：选择当前Q值最高的房产
+                choice = max(remaining, key=lambda h: self.Q.get(h['id'], 0.0))
+            ranked_list.append(choice)
+            remaining.remove(choice)
+        return ranked_list
+
+    def update_q_value(self, house_id: int, reward: float):
+        """
+        根据用户反馈更新指定房产的Q值。
+        :param house_id: 房产ID
+        :param reward: 用户针对该房产的反馈（正向或负向的分值）
+        这里采用单步Q更新：Q_new = Q_old + α * (reward - Q_old) （无后续状态，等效于bandit更新）。
+        """
+        current_q = self.Q.get(house_id, 0.0)
+        # 更新Q值
+        new_q = current_q + self.alpha * (reward - current_q)
+        self.Q[house_id] = new_q
+
+    def train(self, episodes: int = 100, feedback_func=None):
+        """
+        模拟交互训练，通过多轮反馈更新Q值。
+        :param episodes: 模拟训练轮数
+        :param feedback_func: 用户反馈函数，输入房产ID或对象，输出反馈reward值。
+        如果未提供反馈函数，则不执行训练。
+        """
+        if feedback_func is None:
+            return
+        for ep in range(episodes):
+            # 每轮随机选择一个房产进行反馈
+            if not self.Q:
+                break
+            house_id = random.choice(list(self.Q.keys()))
+            reward = feedback_func(house_id)
+            # 更新对应房产的Q值
+            self.update_q_value(house_id, reward)
+
+def rank_with_rl(houses: list, criteria: dict, preferences: dict, epsilon: float = None) -> list:
+    """
+    使用强化学习策略对房产列表进行排序的便捷接口。
+    相当于初始化一个RLRanker实例并调用其 rank_properties() 方法。
+    """
+    rl_ranker = RLRanker(criteria, preferences, epsilon=epsilon)
+    return rl_ranker.rank_properties(houses)
+```
+
+## evolutionary\_optimizer.py
+
+```python
+import random
+
+class EvolutionaryOptimizer:
+    """
+    多目标进化优化模块，用于生成房源集合的近似帕累托最优解。
+    支持使用NSGA-II、MOEA/D等算法逼近Pareto前沿。
+    """
+    def __init__(self, criteria: dict):
+        """
+        初始化优化器，根据当前筛选条件确定需要考虑的目标字段。
+        :param criteria: 当前用户筛选条件字典（决定优化目标维度，例如是否考虑距离）。
+        """
+        self.criteria = criteria
+        # 基础优化目标：价格、卧室数、浴室数、面积
+        self.objective_keys = ["price", "bedrooms", "bathrooms", "area"]
+        # 如果用户要求附近设施，则将相应距离也纳入目标
+        if criteria.get("school_nearby", False):
+            self.objective_keys.append("distance_to_nearest_school")
+        if criteria.get("hospital_nearby", False):
+            self.objective_keys.append("distance_to_nearest_hospital")
+
+    def evaluate_objectives(self, house: dict) -> list:
+        """
+        计算单个房产在所有目标上的数值。
+        返回值列表对应 self.objective_keys 中各目标的值（注：值越小越好）。
+        """
+        values = []
+        for key in self.objective_keys:
+            if house.get(key) is None:
+                # 缺失值视为劣势（用无穷大表示）
+                values.append(float('inf'))
+                continue
+            val = house[key]
+            # 对于需最大化的属性（卧室、浴室、面积），取负值使之转换为最小化问题
+            if key in ["bedrooms", "bathrooms", "area"]:
+                values.append(-float(val))
+            else:
+                # 价格或距离等，值本身就是越小越好
+                values.append(float(val))
+        return values
+
+    def dominates(self, house_a: dict, house_b: dict) -> bool:
+        """
+        判断房产A是否在所有目标上不劣于B且至少一个目标上更优（即A支配B）。
+        """
+        vals_a = self.evaluate_objectives(house_a)
+        vals_b = self.evaluate_objectives(house_b)
+        better_or_equal = True
+        strictly_better = False
+        for a, b in zip(vals_a, vals_b):
+            if a > b:
+                better_or_equal = False
+                break
+            if a < b:
+                strictly_better = True
+        return better_or_equal and strictly_better
+
+    def find_pareto_front(self, houses: list) -> list:
+        """
+        从房源列表中筛选出帕累托前沿解集（非支配解集合）。
+        返回未被其他房源支配的房产列表。
+        """
+        pareto_front = []
+        for house in houses:
+            dominated = False
+            for other in houses:
+                if other is house:
+                    continue
+                if self.dominates(other, house):
+                    dominated = True
+                    break
+            if not dominated:
+                pareto_front.append(house)
+        return pareto_front
+
+    def optimize_nsga2(self, houses: list, generations: int = 50, population_size: int = 20) -> list:
+        """
+        使用简化的NSGA-II遗传算法在房源集合上近似搜索帕累托前沿。
+        :param houses: 当前满足基本筛选条件的房产列表
+        :param generations: 进化代数
+        :param population_size: 种群规模
+        :return: 近似的帕累托前沿房产列表
+        """
+        if not houses:
+            return []
+        # 初始化种群：随机选择若干房产个体
+        population = random.sample(houses, min(population_size, len(houses)))
+        for gen in range(generations):
+            new_population = population.copy()
+            # 精英保留：保留当前种群中的帕累托前沿个体
+            pareto_front = self.find_pareto_front(population)
+            # 交叉繁殖：随机从Pareto前沿挑选个体加入新种群（由于房源属性无法直接交叉，这里简化为直接加入）
+            while len(new_population) < population_size:
+                new_population.append(random.choice(pareto_front))
+            # 变异：以一定概率将种群中某个个体替换为未在当前种群中的随机房产
+            if random.random() < 0.3:
+                remaining = [h for h in houses if h not in new_population]
+                if remaining:
+                    new_population[random.randrange(len(new_population))] = random.choice(remaining)
+            # 更新种群
+            population = new_population
+        # 返回最终种群的非支配解集（去重）
+        final_front = []
+        seen_ids = set()
+        for house in self.find_pareto_front(population):
+            hid = house.get('id')
+            if hid not in seen_ids:
+                final_front.append(house)
+                seen_ids.add(hid)
+        return final_front
+
+    def optimize_moead(self, houses: list, population_size: int = 20) -> list:
+        """
+        使用MOEA/D加权分解方法搜索Pareto前沿解。
+        基于随机生成的多组权重向量，将多目标优化转化为一系列加权子问题并求解。
+        :param houses: 当前满足基本筛选条件的房产列表
+        :param population_size: 生成的权重向量数量（对应子问题个数）
+        :return: 近似的帕累托前沿房产列表
+        """
+        if not houses:
+            return []
+        dim = len(self.objective_keys)
+        solutions = []
+        # 随机生成若干权重向量
+        for _ in range(population_size):
+            # 随机生成dim个正随机权重并归一化
+            weights = [random.random() for _ in range(dim)]
+            total = sum(weights)
+            if total == 0:
+                weights = [1.0 / dim] * dim
+            else:
+                weights = [w / total for w in weights]
+            # 对于每个权重向量，挑选使加权和最小的房产作为解
+            best_house = None
+            best_value = float('inf')
+            for house in houses:
+                # 计算该房产的加权目标值
+                obj_vals = self.evaluate_objectives(house)
+                weighted_sum = sum(w * val for w, val in zip(weights, obj_vals))
+                if weighted_sum < best_value:
+                    best_value = weighted_sum
+                    best_house = house
+            if best_house:
+                solutions.append(best_house)
+        # 返回这些解的非支配集
+        return self.find_pareto_front(solutions)
+
+    def optimize_hybrid(self, houses: list, generations: int = 50, population_size: int = 20) -> list:
+        """
+        结合NSGA-II和MOEA/D算法的混合优化，搜索帕累托前沿解。
+        首先分别运行NSGA-II和MOEA/D获取解集，合并后取非支配解集作为最终结果。
+        """
+        # 分别获取NSGA-II和MOEA/D的结果
+        front_nsga2 = self.optimize_nsga2(houses, generations=generations, population_size=population_size)
+        front_moead = self.optimize_moead(houses, population_size=population_size)
+        combined = front_nsga2 + front_moead
+        return self.find_pareto_front(combined)
+
+# 提供便捷的模块级函数接口
+def optimize_with_nsga2(houses: list, criteria: dict, generations: int = 50, population_size: int = 20) -> list:
+    """
+    使用NSGA-II算法对房源列表进行多目标优化，返回帕累托前沿房源列表。
+    """
+    optimizer = EvolutionaryOptimizer(criteria)
+    return optimizer.optimize_nsga2(houses, generations=generations, population_size=population_size)
+
+def optimize_with_moead(houses: list, criteria: dict, population_size: int = 20) -> list:
+    """
+    使用MOEA/D算法对房源列表进行多目标优化，返回帕累托前沿房源列表。
+    """
+    optimizer = EvolutionaryOptimizer(criteria)
+    return optimizer.optimize_moead(houses, population_size=population_size)
+
+def optimize_with_hybrid(houses: list, criteria: dict, generations: int = 50, population_size: int = 20) -> list:
+    """
+    使用混合优化策略（NSGA-II + MOEA/D）对房源列表进行多目标优化，返回帕累托前沿房源列表。
+    """
+    optimizer = EvolutionaryOptimizer(criteria)
+    return optimizer.optimize_hybrid(houses, generations=generations, population_size=population_size)
+```
+
+## recommendation\_engine.py
+
+```python
+from data_loader import load_data
+from graph_builder import build_graph
+from gnn_model import train_gnn
+from evolutionary_optimizer import optimize_with_hybrid
+from rl_agent import rank_with_rl
+from utils import calculate_score, rank_properties
+
+def generate_recommendations(houses_file: str, facilities_file: str,
+                              preferences_file: str, criteria_file: str,
+                              top_n: int = None) -> list:
+    """
+    整合各模块生成房产推荐列表。
+    :param houses_file: 房源数据文件路径
+    :param facilities_file: 设施数据文件路径
+    :param preferences_file: 用户偏好数据文件路径
+    :param criteria_file: 用户筛选条件文件路径
+    :param top_n: 返回前多少个推荐结果（默认None表示返回全部排序结果）
+    :return: 推荐房源列表（每项为 (房源dict, 综合评分) 元组），按推荐顺序排列
+    """
+    # 1. 加载并预处理数据
+    houses, schools, hospitals, preferences, criteria = load_data(
+        houses_file, facilities_file, preferences_file, criteria_file
+    )
+    if not houses:
+        return []  # 无符合条件的房源
+    # 2. 进化算法筛选Pareto最优候选集
+    candidate_houses = optimize_with_hybrid(houses, criteria)
+    if not candidate_houses:
+        candidate_houses = houses  # 如果Pareto集为空，则退化为使用所有房源
+    # 3. 基于图神经网络训练获取房源表示
+    G = build_graph(candidate_houses, schools, hospitals)
+    embeddings = train_gnn(G, embedding_dim=16, epochs=50)
+    # 将嵌入向量添加到房源数据中（可用于后续分析或复杂策略）
+    for house in candidate_houses:
+        hid = house['id']
+        if hid < len(embeddings):
+            house['embedding'] = embeddings[hid]
+    # 4. 强化学习排序房源列表
+    ranked_houses = rank_with_rl(candidate_houses, criteria, preferences, epsilon=0.0)
+    # 5. 计算最终综合评分并整理输出
+    recommended_list = []
+    for house in ranked_houses:
+        score = calculate_score(house, criteria, preferences.get("weights", {}))
+        recommended_list.append((house, score))
+    # 截取Top N结果
+    if top_n is not None:
+        recommended_list = recommended_list[:top_n]
+    return recommended_list
+```
+
+## utils.py
+
+```python
+import json
+import re
+
+def compute_statistics(houses: list) -> dict:
+    """
+    计算房源列表中数值属性的范围，用于归一化。
+    针对 price/bedrooms/bathrooms/area 四个字段，将其转换为数值并收集最小值和最大值。
+    返回 {属性: (min, max)} 的字典。
+    """
+    stats = {}
+    if not houses:
+        return stats
+    numeric_fields = ["price", "bedrooms", "bathrooms", "area"]
+    for field in numeric_fields:
+        values = []
+        for h in houses:
+            raw = h.get(field)
+            if raw is None:
+                continue
+            try:
+                num = float(raw)
+                if field in ("bedrooms", "bathrooms"):
+                    num = int(num)
+                # 将可能是字符串的数值转换后回写
+                h[field] = num
+                values.append(num)
+            except (ValueError, TypeError):
+                continue
+        if values:
+            stats[field] = (min(values), max(values))
+    return stats
+
+def normalize_features(houses: list, stats: dict) -> None:
+    """
+    对每个房源的数值字段进行Min-Max归一化，添加 *_norm 字段表示归一化值。
+    若某字段无统计数据，则归一化值设为0。
+    """
+    for h in houses:
+        for field, (min_val, max_val) in stats.items():
+            val = h.get(field)
+            if val is None:
+                h[f"{field}_norm"] = 0.0
+            else:
+                if max_val > min_val:
+                    h[f"{field}_norm"] = (val - min_val) / (max_val - min_val)
+                else:
+                    h[f"{field}_norm"] = 0.0
+
+def parse_natural_language(input_text: str) -> dict:
+    """
+    基于关键词规则解析中文自然语言需求，生成对应的偏好调整字典。
+    :param input_text: 用户输入的中文偏好描述
+    :return: 调整指令字典，例如 {"price": {"weight": 0, "size": 0}, ...}
+    """
+    text = input_text.lower()  # 中文通常不区分大小写，这里主要针对英文字母
+    # 初始化默认不变的调整字典
+    adjust = {
+        "price": {"weight": 1, "size": 1},
+        "bedrooms": {"weight": 1, "size": 1},
+        "bathrooms": {"weight": 1, "size": 1},
+        "area": {"weight": 1, "size": 1},
+        "house_type": {"weight": 1},
+        "hospital_nearby": {"weight": 1},
+        "school_nearby": {"weight": 1}
+    }
+    # 解析价格需求
+    if "价格" in text or "预算" in text or "价钱" in text:
+        if any(word in text for word in ["低", "便宜", "降", "减少"]):
+            # 希望价格更低
+            adjust["price"]["weight"] = 0
+            adjust["price"]["size"] = 0
+        elif any(word in text for word in ["高", "贵", "增加", "提升"]):
+            # 接受更高价格
+            adjust["price"]["weight"] = 2
+            adjust["price"]["size"] = 2
+    # 解析卧室需求
+    if "卧室" in text or "室" in text:
+        if any(word in text for word in ["增多", "更多", "提高", "多点", "大点"]):
+            adjust["bedrooms"]["weight"] = 2
+            adjust["bedrooms"]["size"] = 2
+        elif any(word in text for word in ["减少", "更少", "降低", "少点"]):
+            adjust["bedrooms"]["weight"] = 0
+            adjust["bedrooms"]["size"] = 0
+    # 根据提及的“X口人”调整卧室要求
+    family_match = re.search(r"(\d+)口人", text)
+    if family_match:
+        num = int(family_match.group(1))
+        adjust["bedrooms"]["weight"] = 2
+        adjust["bedrooms"]["size"] = 2 if num > 0 else 1
+    # 解析卫生间需求
+    if "卫生间" in text or "浴室" in text or "洗手间" in text:
+        if any(word in text for word in ["增多", "更多", "大点", "太少", "少了"]):
+            adjust["bathrooms"]["weight"] = 2
+            adjust["bathrooms"]["size"] = 2
+        elif any(word in text for word in ["减少", "更少", "小点", "太多", "多了"]):
+            adjust["bathrooms"]["weight"] = 0
+            adjust["bathrooms"]["size"] = 0
+    # 解析面积需求
+    if "面积" in text or "平方" in text or "大小" in text:
+        if any(word in text for word in ["大", "增加", "提升"]):
+            adjust["area"]["weight"] = 2
+            adjust["area"]["size"] = 2
+        elif any(word in text for word in ["小", "减少", "降低"]):
+            adjust["area"]["weight"] = 0
+            adjust["area"]["size"] = 0
+    # 解析户型偏好
+    if "别墅" in text or "独栋" in text:
+        adjust["house_type"]["weight"] = 2
+        # 注：在 apply_adjustments 中可将 criteria["house_type"] 设置为具体类型
+    if "公寓" in text or "平房" in text:
+        adjust["house_type"]["weight"] = 2
+    # 解析学区/孩子需求
+    if "学校" in text or "学区" in text or "孩子" in text or "幼儿园" in text:
+        adjust["school_nearby"]["weight"] = 2
+    # 解析医疗/老人需求
+    if "医院" in text or "医疗" in text or "老人" in text or "养老" in text:
+        adjust["hospital_nearby"]["weight"] = 2
+    # 解析采光/朝向需求（当前系统未支持，预留）
+    if "采光" in text or "朝南" in text or "阳光" in text:
+        pass
+    return adjust
+
+def apply_adjustments(criteria: dict, preferences: dict, adjust_dict: dict) -> None:
+    """
+    根据偏好调整指令字典，更新用户筛选条件和偏好权重，并保存更新后的配置。
+    :param criteria: 当前筛选条件字典（更新结果会写入 updated_criteria.json）
+    :param preferences: 用户偏好字典（更新结果会写入 user_preferences.json）
+    :param adjust_dict: parse_natural_language 生成的调整指令字典
+    """
+    # 从用户偏好中取得权重子字典
+    weights = preferences.get("weights", {})
+    # 应用每项调整
+    for key, adj in adjust_dict.items():
+        # 调整偏好权重
+        if key in weights and "weight" in adj:
+            if adj["weight"] == 2:
+                weights[key] = weights.get(key, 1.0) * 1.25  # 权重调高
+            elif adj["weight"] == 0:
+                weights[key] = weights.get(key, 1.0) * 0.75  # 权重调低
+        # 调整筛选条件范围
+        if key in criteria:
+            # 数值区间属性调整
+            if isinstance(criteria[key], list) and "size" in adj:
+                min_val, max_val = criteria[key]
+                if adj["size"] == 2:
+                    criteria[key] = [min_val * 1.2, max_val * 1.2]  # 放宽范围（上下边界各增20%）
+                elif adj["size"] == 0:
+                    criteria[key] = [min_val * 0.8, max_val * 0.8]  # 收紧范围（上下边界各减20%）
+            # 布尔条件调整（附近设施）
+            elif isinstance(criteria[key], bool) and "weight" in adj:
+                if adj["weight"] == 2:
+                    criteria[key] = True
+                elif adj["weight"] == 0:
+                    criteria[key] = False
+            # 户型偏好调整（这里只示例调整权重，不直接改类型筛选）
+            elif key == "house_type" and "weight" in adj:
+                pass
+    # 将更新后的权重写回偏好字典
+    preferences["weights"] = weights
+    # 保存更新后的配置到文件（持久化）
+    with open("user_preferences.json", "w", encoding="utf-8") as f:
+        json.dump(preferences, f, ensure_ascii=False, indent=4)
+    with open("updated_criteria.json", "w", encoding="utf-8") as f:
+        json.dump(criteria, f, ensure_ascii=False, indent=4)
+
+def calculate_score(house: dict, criteria: dict, weights: dict) -> float:
+    """
+    计算单个房产的综合评分。
+    根据用户偏好权重(weights)和筛选条件(criteria)，对房产各相关属性评分后加权汇总。
+    """
+    score = 0.0
+    for key, weight in weights.items():
+        if not weight or weight == 0:
+            # 权重为0表示用户不关注该属性
+            continue
+        # 数值属性评分
+        if key in ['price', 'bedrooms', 'bathrooms', 'area']:
+            value = house.get(key)
+            if value is None:
+                continue  # 属性缺失则不计分
+            # 获取用户针对该属性设定的偏好范围
+            if key in criteria and isinstance(criteria[key], list):
+                min_val, max_val = criteria[key]
+            else:
+                # 若未指定范围，则视为不限制（以房产自身值为准）
+                min_val = value
+                max_val = value
+            # 计算该属性的分数
+            if min_val <= value <= max_val:
+                attr_score = 100.0  # 在偏好范围内得满分
+            else:
+                # 超出范围，根据与最近边界的偏差比例降低得分
+                if value < min_val:
+                    diff = min_val - value  # 低于下限的差值
+                else:
+                    diff = value - max_val  # 高于上限的差值
+                span = max_val - min_val if max_val != min_val else (max_val if max_val != 0 else 1)
+                score_ratio = max(0.0, 1 - diff / span)  # 差距占范围比例，越大得分越低
+                attr_score = score_ratio * 100.0
+            score += attr_score * weight
+        # 房屋类型匹配评分
+        elif key == 'house_type':
+            desired_type = criteria.get("house_type")
+            actual_type = house.get("house_type")
+            if not desired_type or not actual_type:
+                continue
+            if str(desired_type).lower() in str(actual_type).lower():
+                attr_score = 100.0  # 类型符合偏好
+            else:
+                attr_score = 50.0   # 类型不符，打一半分
+            score += attr_score * weight
+        # 附近设施偏好评分
+        elif key in ['hospital_nearby', 'school_nearby']:
+            # 用户未要求该条件则不加分不扣分
+            if not criteria.get(key, False):
+                continue
+            if key == 'hospital_nearby':
+                dist = house.get("distance_to_nearest_hospital", float('inf'))
+            else:
+                dist = house.get("distance_to_nearest_school", float('inf'))
+            if dist == float('inf') or dist >= 5.0:
+                # 距离未知或>=5公里算作0分
+                attr_score = 0.0
+            else:
+                # 距离越近分数越高（线性：0距离100分，5公里0分）
+                attr_score = max(0.0, (1 - dist / 5.0)) * 100.0
+            score += attr_score * weight
+        # 其他属性暂无特殊处理
+    return score
+
+def rank_properties(houses: list, criteria: dict, weights: dict, top_n: int = None) -> list:
+    """
+    对房源列表进行静态评分并排序。
+    返回按照综合评分从高到低排序的 [(房产dict, 分数)] 列表。
+    如果指定了 top_n，则仅返回前 top_n 个结果。
+    """
+    scored_list = []
+    for house in houses:
+        total_score = calculate_score(house, criteria, weights)
+        scored_list.append((house, total_score))
+    scored_list.sort(key=lambda x: x[1], reverse=True)
+    if top_n is not None:
+        return scored_list[:top_n]
+    return scored_list
+```
