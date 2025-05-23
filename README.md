@@ -85,7 +85,12 @@ python interactive_demo.py --nl "希望房子更大并靠近医院"
 
 This repository implements a multi-objective real estate recommender combining GNN, reinforcement learning and evolutionary search. Use `run.sh` or `python train.py` to train the full pipeline. `experiments.py` reproduces ablation studies and exports Pareto front data for visualization. `interactive_demo.py` demonstrates dynamic preference updating via natural language.
 
+## 可视化与评估工具
+
+新增 `metrics_visualization.py` 提供多种指标计算与图表绘制函数，包括 NDCG/MAP、Pareto Hypervolume、3D 帕累托散点图、雷达图以及多样性柱状图等。运行脚本后将生成 PNG 图片，便于在论文中直接使用。
 ## 数据来源与授权
+
+
 
 - `facilities.geojson` 来源于 [OpenStreetMap](https://www.openstreetmap.org/)，遵循
   [Open Database License](https://opendatacommons.org/licenses/odbl/)。
