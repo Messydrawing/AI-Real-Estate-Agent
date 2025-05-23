@@ -1,0 +1,27 @@
+{
+    "price": {
+        "weight": 0,
+        "size": 0
+    },
+    "bedrooms": {
+        "weight": 2,
+        "size": 1
+    },
+    "bathrooms": {
+        "weight": 1,
+        "size": 1
+    },
+    "area": {
+        "weight": 1,
+        "size": 1
+    },
+    "house_type": {
+        "weight": 1
+    },
+    "hospital_nearby": {
+        "weight": 2
+    },
+    "school_nearby": {
+        "weight": 2
+    }
+}

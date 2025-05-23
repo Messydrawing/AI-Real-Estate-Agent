@@ -1,0 +1,12 @@
+{
+    "weights": {
+        "price": 0.140625,
+        "bedrooms": 0.75,
+        "bathrooms": 0.5,
+        "area": 0.5,
+        "house_type": 0.3125,
+        "hospital_nearby": 0.390625,
+        "school_nearby": 0.390625
+    },
+    "epsilon": 0.05
+}

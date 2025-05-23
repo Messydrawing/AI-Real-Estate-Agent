@@ -1,0 +1,22 @@
+{
+    "price": [
+        96000.0,
+        1408000.0
+    ],
+    "bedrooms": [
+        4,
+        7
+    ],
+    "bathrooms": [
+        3,
+        5
+    ],
+    "area": [
+        0.0,
+        600000.0
+    ],
+    "house_type": "House",
+    "hospital_nearby": true,
+    "school_nearby": true,
+    "other details": "no"
+}
