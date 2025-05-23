@@ -93,7 +93,7 @@ def parse_natural_language(text: str) -> dict:
     return adjust
 
 
-def apply_adjustments(criteria: dict, preferences: dict, adjust: dict) -> None:
+def apply_adjustments(criteria: dict, preferences: dict, adjust: dict, save: bool = True) -> None:
     weights = preferences.get('weights', {})
     for key, adj in adjust.items():
         if key in weights and 'weight' in adj:
@@ -111,10 +111,11 @@ def apply_adjustments(criteria: dict, preferences: dict, adjust: dict) -> None:
             elif isinstance(criteria[key], bool) and 'weight' in adj:
                 criteria[key] = adj['weight'] == 2
     preferences['weights'] = weights
-    with open('user_preferences.json', 'w', encoding='utf-8') as f:
-        json.dump(preferences, f, ensure_ascii=False, indent=4)
-    with open('updated_criteria.json', 'w', encoding='utf-8') as f:
-        json.dump(criteria, f, ensure_ascii=False, indent=4)
+    if save:
+        with open('user_preferences.json', 'w', encoding='utf-8') as f:
+            json.dump(preferences, f, ensure_ascii=False, indent=4)
+        with open('updated_criteria.json', 'w', encoding='utf-8') as f:
+            json.dump(criteria, f, ensure_ascii=False, indent=4)
 
 
 def calculate_score(house: dict, criteria: dict, weights: dict) -> float:
