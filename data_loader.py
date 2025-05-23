@@ -50,7 +50,7 @@ def load_facilities(facilities_file: str) -> tuple:
 def filter_houses(houses: list, criteria: dict, schools: list = None,
                   hospitals: list = None,
                   distance_threshold: float = DEFAULT_DISTANCE_THRESHOLD) -> list:
-    """按照筛选条件过滤房源"""
+    """按照筛选条件过滤房源并计算设施距离"""
     filtered = []
     for house in houses:
         try:
@@ -85,31 +85,20 @@ def filter_houses(houses: list, criteria: dict, schools: list = None,
                 continue
         filtered.append(house)
 
-    need_hosp = criteria.get('hospital_nearby', False)
-    need_sch = criteria.get('school_nearby', False)
-    if not (need_hosp or need_sch):
-        return filtered
-
     schools = schools or []
     hospitals = hospitals or []
-    second_pass = []
     for house in filtered:
         coords = house.get('coordinates')
         if not coords or len(coords) != 2:
             continue
         lat, lon = coords
-        if need_hosp:
+        if hospitals:
             d_h = min((geodesic((lat, lon), s).kilometers for s in hospitals), default=float('inf'))
             house['distance_to_nearest_hospital'] = d_h
-            if d_h > distance_threshold:
-                continue
-        if need_sch:
+        if schools:
             d_s = min((geodesic((lat, lon), s).kilometers for s in schools), default=float('inf'))
             house['distance_to_nearest_school'] = d_s
-            if d_s > distance_threshold:
-                continue
-        second_pass.append(house)
-    return second_pass
+    return filtered
 
 
 def load_data(houses_file: str, facilities_file: str, preferences_file: str,

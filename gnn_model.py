@@ -12,9 +12,9 @@ class HouseGCN(nn.Module):
         self.conv1 = GCNConv(input_dim, hidden_dim)
         self.conv2 = GCNConv(hidden_dim, output_dim)
 
-    def forward(self, x, edge_index):
-        x = self.conv1(x, edge_index).relu()
-        x = self.conv2(x, edge_index)
+    def forward(self, x, edge_index, edge_weight=None):
+        x = self.conv1(x, edge_index, edge_weight=edge_weight).relu()
+        x = self.conv2(x, edge_index, edge_weight=edge_weight)
         return x
 
 
@@ -45,7 +45,8 @@ def train_gnn(graph, embedding_dim: int = 16, epochs: int = 100) -> list:
                 features[idx, 5] = 1.0
 
     edges = []
-    for u, v in graph.edges():
+    weights = []
+    for u, v, data in graph.edges(data=True):
         if u.startswith('house') and v.startswith('house'):
             continue
         if u.startswith('house'):
@@ -59,10 +60,14 @@ def train_gnn(graph, embedding_dim: int = 16, epochs: int = 100) -> list:
             fid = house_count + int(fac_node.split('_')[1])
         else:
             fid = house_count + school_count + int(fac_node.split('_')[1])
+        w = float(data.get('weight', 1.0))
         edges.append([hid, fid])
+        weights.append(w)
         edges.append([fid, hid])
+        weights.append(w)
 
     edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous() if edges else torch.empty((2, 0), dtype=torch.long)
+    edge_weight = torch.tensor(weights, dtype=torch.float) if edges else torch.empty((0,), dtype=torch.float)
 
     input_dim = features.size(1)
     model = HouseGCN(input_dim, 16, embedding_dim)
@@ -71,7 +76,7 @@ def train_gnn(graph, embedding_dim: int = 16, epochs: int = 100) -> list:
     model.train()
     for _ in range(epochs):
         optimizer.zero_grad()
-        embed = model(features, edge_index)
+        embed = model(features, edge_index, edge_weight)
         pos, neg = [], []
         for u, v in graph.edges():
             if u.startswith('house'):
@@ -104,7 +109,7 @@ def train_gnn(graph, embedding_dim: int = 16, epochs: int = 100) -> list:
 
     model.eval()
     with torch.no_grad():
-        final_embed = model(features, edge_index).cpu().numpy()
+        final_embed = model(features, edge_index, edge_weight).cpu().numpy()
     house_embeddings = [final_embed[i].tolist() if i < final_embed.shape[0] else [0.0] * embedding_dim for i in range(house_count)]
     return house_embeddings
 

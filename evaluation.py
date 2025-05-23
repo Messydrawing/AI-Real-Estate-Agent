@@ -172,11 +172,11 @@ def run_evaluation(output_dir):
     # Hybrid
     hybrid_front, hv_hist_hybrid = optimize_with_hybrid(
         houses, criteria, save_pareto_path=os.path.join(output_dir, 'hybrid_pareto.json'), track=True)
-    prepare_embeddings(hybrid_front, schools, hospitals)
+    prepare_embeddings(houses, schools, hospitals)
     hybrid_agent = RLRanker(criteria, prefs, state_dim=16)
-    rewards_hybrid = hybrid_agent.train(hybrid_front, episodes=50, verbose=True)
-    hybrid_ranked = hybrid_agent.rank(hybrid_front)
-    ndcg_hybrid, map_hybrid = evaluate_ranking(hybrid_ranked, hybrid_front, criteria, weights)
+    rewards_hybrid = hybrid_agent.train(houses, episodes=50, verbose=True)
+    hybrid_ranked = hybrid_agent.rank(houses)
+    ndcg_hybrid, map_hybrid = evaluate_ranking(hybrid_ranked, houses, criteria, weights)
 
     plt.figure()
     plt.plot(hv_hist_hybrid)
