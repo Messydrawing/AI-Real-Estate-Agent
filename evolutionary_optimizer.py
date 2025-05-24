@@ -71,12 +71,14 @@ class EvolutionaryOptimizer:
 
     def optimize_nsga2(self, houses: list, generations: int = 50, population_size: int = 20,
                         track: bool = False):
-        """运行简化的 NSGA-II, 可选记录每代的超体积"""
+        """运行简化的 NSGA-II, 可选记录每代的超体积
+        打印每一代的进度信息
+        """
         if not houses:
             return [] if not track else ([], [])
         population = random.sample(houses, min(population_size, len(houses)))
         history = []
-        for _ in range(generations):
+        for gen in range(generations):
             new_pop = population.copy()
             pareto = self.find_pareto_front(population)
             while len(new_pop) < population_size:
@@ -88,6 +90,7 @@ class EvolutionaryOptimizer:
             population = new_pop
             if track:
                 history.append(self.compute_hypervolume(population))
+            print(f'NSGA-II generation {gen + 1}/{generations} completed')
         final_front = []
         seen = set()
         for h in self.find_pareto_front(population):
@@ -122,13 +125,17 @@ class EvolutionaryOptimizer:
 
     def optimize_hybrid(self, houses: list, generations: int = 50, population_size: int = 20,
                         track: bool = False):
-        """NSGA-II 与 MOEA/D 协同优化，track=True 时返回超体积历史"""
+        """NSGA-II 与 MOEA/D 协同优化，track=True 时返回超体积历史
+        在两个阶段之间打印进度信息
+        """
+        print('Hybrid optimization: running NSGA-II stage')
         if track:
             nsga_front, history = self.optimize_nsga2(
                 houses, generations, population_size, track=True)
         else:
             nsga_front = self.optimize_nsga2(houses, generations, population_size)
             history = []
+        print('Hybrid optimization: running MOEA/D stage')
         moead = self.optimize_moead(houses, population_size)
         final_front = self.find_pareto_front(nsga_front + moead)
         return (final_front, history) if track else final_front
