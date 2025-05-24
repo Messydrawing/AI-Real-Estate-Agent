@@ -4,6 +4,7 @@ import json
 import numpy as np
 import matplotlib.pyplot as plt
 import torch
+import argparse
 
 from data_loader import load_houses, load_facilities, filter_houses
 from utils import compute_statistics, normalize_features, rank_properties, calculate_score
@@ -12,9 +13,6 @@ from rl_agent import RLRanker
 from graph_builder import build_graph
 from gnn_model import train_gnn
 from evaluation import evaluate_ranking
-
-torch.set_num_threads(8)
-os.environ.setdefault("OMP_NUM_THREADS", "8")
 
 
 def generate_random_prefs(stats, house_types):
@@ -71,6 +69,15 @@ def evaluate_one(all_houses, schools, hospitals, weights, criteria):
 
 
 def main():
+    parser = argparse.ArgumentParser(
+        description='Run random preference evaluations')
+    parser.add_argument('--threads', type=int, default=8,
+                        help='Number of CPU threads to use')
+    args = parser.parse_args()
+
+    torch.set_num_threads(args.threads)
+    os.environ["OMP_NUM_THREADS"] = str(args.threads)
+
     all_houses = load_houses('updated_houses_with_price_history.json')
     schools, hospitals = load_facilities('facilities.geojson')
     stats_all = compute_statistics(all_houses)
