@@ -1,0 +1,1725 @@
+# data_loader.py
+import json
+from geopy.distance import geodesic
+from utils import compute_statistics, normalize_features
+
+DEFAULT_DISTANCE_THRESHOLD = 5.0  # 公里
+
+
+def load_user_preferences(preferences_file: str) -> dict:
+    """加载用户偏好设置"""
+    with open(preferences_file, 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+
+def load_criteria(criteria_file: str) -> dict:
+    """加载筛选条件"""
+    with open(criteria_file, 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+
+def load_houses(houses_file: str) -> list:
+    """加载房源列表并赋予唯一 id"""
+    with open(houses_file, 'r', encoding='utf-8') as f:
+        houses = json.load(f)
+    for idx, house in enumerate(houses):
+        house['id'] = idx
+        if 'house_size' in house:
+            house['area'] = house.pop('house_size')
+    return houses
+
+
+def load_facilities(facilities_file: str) -> tuple:
+    """加载学校和医院坐标"""
+    with open(facilities_file, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    schools, hospitals = [], []
+    for feat in data.get('features', []):
+        props = feat.get('properties', {})
+        amenity = str(props.get('amenity', '')).lower()
+        coords = feat.get('geometry', {}).get('coordinates', [])
+        if len(coords) == 2:
+            lon, lat = coords
+            if -90 <= lat <= 90 and -180 <= lon <= 180:
+                if amenity == 'school':
+                    schools.append((lat, lon))
+                elif amenity == 'hospital':
+                    hospitals.append((lat, lon))
+    return schools, hospitals
+
+
+def filter_houses(houses: list, criteria: dict, schools: list = None,
+                  hospitals: list = None,
+                  distance_threshold: float = DEFAULT_DISTANCE_THRESHOLD) -> list:
+    """按照筛选条件过滤房源并计算设施距离"""
+    filtered = []
+    for house in houses:
+        try:
+            if house.get('price') is not None:
+                house['price'] = float(house['price'])
+            if house.get('bedrooms') is not None:
+                house['bedrooms'] = int(float(house['bedrooms']))
+            if house.get('bathrooms') is not None:
+                house['bathrooms'] = int(float(house['bathrooms']))
+            if house.get('area') is not None:
+                house['area'] = float(house['area'])
+        except (ValueError, TypeError):
+            continue
+        if 'price' in criteria and isinstance(criteria['price'], list):
+            p = house.get('price')
+            if p is None or p < criteria['price'][0] or p > criteria['price'][1]:
+                continue
+        if 'bedrooms' in criteria and isinstance(criteria['bedrooms'], list):
+            br = house.get('bedrooms')
+            if br is None or br < criteria['bedrooms'][0] or br > criteria['bedrooms'][1]:
+                continue
+        if 'bathrooms' in criteria and isinstance(criteria['bathrooms'], list):
+            ba = house.get('bathrooms')
+            if ba is None or ba < criteria['bathrooms'][0] or ba > criteria['bathrooms'][1]:
+                continue
+        if 'area' in criteria and isinstance(criteria['area'], list):
+            a = house.get('area')
+            if a is None or a < criteria['area'][0] or a > criteria['area'][1]:
+                continue
+        if criteria.get('house_type'):
+            if criteria['house_type'].lower() not in str(house.get('house_type', '')).lower():
+                continue
+        filtered.append(house)
+
+    schools = schools or []
+    hospitals = hospitals or []
+    for house in filtered:
+        coords = house.get('coordinates')
+        if not coords or len(coords) != 2:
+            continue
+        lat, lon = coords
+        if hospitals:
+            d_h = min((geodesic((lat, lon), s).kilometers for s in hospitals), default=float('inf'))
+            house['distance_to_nearest_hospital'] = d_h
+        if schools:
+            d_s = min((geodesic((lat, lon), s).kilometers for s in schools), default=float('inf'))
+            house['distance_to_nearest_school'] = d_s
+    return filtered
+
+
+def load_data(houses_file: str, facilities_file: str, preferences_file: str,
+              criteria_file: str) -> tuple:
+    """综合加载并预处理数据"""
+    preferences = load_user_preferences(preferences_file)
+    criteria = load_criteria(criteria_file)
+    houses = load_houses(houses_file)
+    schools, hospitals = load_facilities(facilities_file)
+    houses = filter_houses(houses, criteria, schools, hospitals)
+    stats = compute_statistics(houses)
+    normalize_features(houses, stats)
+    return houses, schools, hospitals, preferences, criteria
+
+
+
+# dynamic_adaptation.py
+import json
+from data_loader import load_data
+from graph_builder import build_graph
+from gnn_model import train_gnn
+from rl_agent import RLRanker
+
+
+PHASE_PREFERENCES = {
+    'A': {'weights': {'price': 2, 'school_nearby': 1, 'area': 1}},
+    'B': {'weights': {'price': 1, 'school_nearby': 2, 'area': 1}},
+    'C': {'weights': {'price': 1, 'school_nearby': 1, 'area': 2}},
+}
+
+
+def run(output_path='dynamic_scores.json'):
+    houses, schools, hospitals, prefs, criteria = load_data(
+        'updated_houses_with_price_history.json',
+        'facilities.geojson',
+        'user_preferences.json',
+        'updated_criteria.json',
+    )
+    graph = build_graph(houses, schools, hospitals)
+    embeddings = train_gnn(graph, embedding_dim=32, epochs=50)
+    for h in houses:
+        hid = h['id']
+        h['embedding'] = embeddings[hid] if hid < len(embeddings) else [0.0] * 32
+
+    ranker = RLRanker(criteria, prefs, state_dim=32)
+    stage_scores = {}
+    for stage, pref in PHASE_PREFERENCES.items():
+        ranker.update_weights(pref['weights'])
+        scores = ranker.train(houses, episodes=20, verbose=True)
+        stage_scores[stage] = scores
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(stage_scores, f, ensure_ascii=False, indent=4)
+
+
+if __name__ == '__main__':
+    run()
+
+
+# evaluation.py
+import os
+import json
+import math
+import argparse
+import random
+import numpy as np
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+import torch
+
+torch.set_num_threads(8)
+os.environ.setdefault("OMP_NUM_THREADS", "8")
+
+from data_loader import load_data, load_houses, load_facilities
+from utils import calculate_score, rank_properties, compute_statistics
+from evolutionary_optimizer import EvolutionaryOptimizer, optimize_with_hybrid
+from rl_agent import RLRanker
+from graph_builder import build_graph
+from gnn_model import train_gnn
+
+
+def ndcg_at_k(scores, k):
+    dcg = sum((2 ** s - 1) / math.log2(i + 2) for i, s in enumerate(scores[:k]))
+    ideal = sorted(scores, reverse=True)
+    idcg = sum((2 ** s - 1) / math.log2(i + 2) for i, s in enumerate(ideal[:k]))
+    return dcg / idcg if idcg > 0 else 0.0
+
+
+def map_at_k(ranked, relevant, k):
+    hits = 0
+    ap = 0.0
+    for i, h in enumerate(ranked[:k], 1):
+        if h['id'] in relevant:
+            hits += 1
+            ap += hits / i
+    denom = min(k, len(relevant))
+    return ap / denom if denom > 0 else 0.0
+
+
+def evaluate_ranking(ranked, all_houses, criteria, weights, k=10):
+    scores = {h['id']: calculate_score(h, criteria, weights) for h in all_houses}
+    rel_scores = [scores[h['id']] for h in ranked]
+    ideal_top = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:k]
+    relevant = set(hid for hid, _ in ideal_top)
+    ndcg = ndcg_at_k(rel_scores, k)
+    m_ap = map_at_k(ranked, relevant, k)
+    return ndcg, m_ap
+
+
+def prepare_embeddings(houses, schools, hospitals, state_dim=32):
+    graph = build_graph(houses, schools, hospitals)
+    embeddings = train_gnn(graph, embedding_dim=state_dim, epochs=100)
+    for h in houses:
+        hid = h['id']
+        h['embedding'] = embeddings[hid] if hid < len(embeddings) else [0.0] * state_dim
+
+
+def prepare_simple_embeddings(houses):
+    for h in houses:
+        h['embedding'] = [h.get('price_norm', 0.0), h.get('bedrooms_norm', 0.0),
+                          h.get('bathrooms_norm', 0.0), h.get('area_norm', 0.0)]
+
+
+def pareto_coverage(ref, cand, criteria):
+    """Coverage of cand by ref (ratio of solutions in cand dominated by ref)."""
+    opt = EvolutionaryOptimizer(criteria)
+    if not cand:
+        return 0.0
+    covered = 0
+    for b in cand:
+        for a in ref:
+            if opt.dominates(a, b) or opt.evaluate_objectives(a) == opt.evaluate_objectives(b):
+                covered += 1
+                break
+    return covered / len(cand)
+
+
+def attribute_scores(house, criteria):
+    keys = ['price', 'bedrooms', 'bathrooms', 'area']
+    if 'house_type' in criteria:
+        keys.append('house_type')
+    if criteria.get('hospital_nearby'):
+        keys.append('hospital_nearby')
+    if criteria.get('school_nearby'):
+        keys.append('school_nearby')
+    scores = {}
+    for k in keys:
+        score = calculate_score(house, {k: criteria.get(k)}, {k: 1.0})
+        scores[k] = score
+    return scores
+
+
+def plot_radar(scores, path):
+    labels = list(scores.keys())
+    values = list(scores.values())
+    angles = np.linspace(0, 2 * np.pi, len(labels), endpoint=False).tolist()
+    values += values[:1]
+    angles += angles[:1]
+    fig = plt.figure()
+    ax = fig.add_subplot(111, polar=True)
+    ax.plot(angles, values, 'o-', linewidth=2)
+    ax.fill(angles, values, alpha=0.25)
+    ax.set_thetagrids([a * 180 / np.pi for a in angles[:-1]], labels)
+    ax.set_ylim(0, 100)
+    plt.tight_layout()
+    plt.savefig(path)
+    plt.close()
+
+
+def plot_metric_bars(metrics, metric_key, path):
+    names = list(metrics.keys())
+    vals = [metrics[n][metric_key] for n in names]
+    plt.figure()
+    plt.bar(names, vals)
+    plt.ylabel(metric_key.upper())
+    plt.tight_layout()
+    plt.savefig(path)
+    plt.close()
+
+
+def plot_pareto_3d(front, obj_keys, path):
+    if len(obj_keys) < 3 or not front:
+        return
+    xs = [h.get(obj_keys[0], 0.0) for h in front]
+    ys = [h.get(obj_keys[1], 0.0) for h in front]
+    zs = [h.get(obj_keys[2], 0.0) for h in front]
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+    ax.scatter(xs, ys, zs)
+    ax.set_xlabel(obj_keys[0])
+    ax.set_ylabel(obj_keys[1])
+    ax.set_zlabel(obj_keys[2])
+    plt.tight_layout()
+    plt.savefig(path)
+    plt.close()
+
+
+def generate_random_prefs(stats, house_types):
+    weights = {
+        'price': random.random(),
+        'bedrooms': random.random(),
+        'bathrooms': random.random(),
+        'area': random.random(),
+        'house_type': random.random(),
+        'hospital_nearby': random.random(),
+        'school_nearby': random.random()
+    }
+    criteria = {
+        'price': sorted(random.sample([stats['price'][0], stats['price'][1],
+                                      random.uniform(stats['price'][0], stats['price'][1])], 2)),
+        'bedrooms': sorted(random.sample([stats['bedrooms'][0], stats['bedrooms'][1],
+                                         random.uniform(stats['bedrooms'][0], stats['bedrooms'][1])], 2)),
+        'bathrooms': sorted(random.sample([stats['bathrooms'][0], stats['bathrooms'][1],
+                                          random.uniform(stats['bathrooms'][0], stats['bathrooms'][1])], 2)),
+    }
+    if 'area' in stats:
+        criteria['area'] = sorted(random.sample([stats['area'][0], stats['area'][1],
+                                                 random.uniform(stats['area'][0], stats['area'][1])], 2))
+    criteria['house_type'] = random.choice(list(house_types)) if house_types else ''
+    criteria['hospital_nearby'] = random.choice([True, False])
+    criteria['school_nearby'] = random.choice([True, False])
+    return weights, criteria
+
+
+def run_evaluation(output_dir, weights_override=None, criteria_override=None,
+                   prefs_override=None):
+    os.makedirs(output_dir, exist_ok=True)
+    houses, schools, hospitals, prefs, criteria = load_data(
+        'updated_houses_with_price_history.json',
+        'facilities.geojson',
+        'user_preferences.json',
+        'updated_criteria.json'
+    )
+    if prefs_override:
+        prefs.update(prefs_override)
+    if weights_override is not None:
+        prefs['weights'] = weights_override
+    if criteria_override:
+        criteria.update(criteria_override)
+    weights = prefs.get('weights', {})
+
+    # Weighted baseline
+    weighted_ranked = [h for h, _ in rank_properties(houses, criteria, weights)]
+    ndcg_w, map_w = evaluate_ranking(weighted_ranked, houses, criteria, weights)
+
+    # RL without GNN
+    prepare_simple_embeddings(houses)
+    prefs_rl = dict(prefs)
+    prefs_rl['epsilon_decay'] = 0.99
+    rl_agent = RLRanker(criteria, prefs_rl, state_dim=4)
+    rewards_rl = rl_agent.train(houses, episodes=100, verbose=True)
+    rl_ranked = rl_agent.rank(houses)
+    ndcg_rl, map_rl = evaluate_ranking(rl_ranked, houses, criteria, weights)
+
+    plt.figure()
+    plt.plot(rewards_rl)
+    plt.xlabel('Episode')
+    plt.ylabel('Reward')
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'rl_rewards.png'))
+
+    # NSGA-II
+    evo = EvolutionaryOptimizer(criteria)
+    nsga_front, hv_hist_nsga = evo.optimize_nsga2(houses, track=True)
+    ndcg_nsga, map_nsga = evaluate_ranking(nsga_front, houses, criteria, weights)
+    plt.figure()
+    plt.plot(hv_hist_nsga)
+    plt.xlabel('Generation')
+    plt.ylabel('Hypervolume')
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'nsga_hv.png'))
+
+    # Hybrid
+    hybrid_front, hv_hist_hybrid = optimize_with_hybrid(
+        houses, criteria, save_pareto_path=os.path.join(output_dir, 'hybrid_pareto.json'), track=True)
+    prepare_embeddings(houses, schools, hospitals)
+    prefs_hybrid = dict(prefs)
+    prefs_hybrid['epsilon_decay'] = 0.99
+    hybrid_agent = RLRanker(criteria, prefs_hybrid, state_dim=32)
+    rewards_hybrid = hybrid_agent.train(houses, episodes=100, verbose=True)
+    hybrid_ranked = hybrid_agent.rank(houses)
+    ndcg_hybrid, map_hybrid = evaluate_ranking(hybrid_ranked, houses, criteria, weights)
+
+    plt.figure()
+    plt.plot(hv_hist_hybrid)
+    plt.xlabel('Generation')
+    plt.ylabel('Hypervolume')
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'hybrid_hv.png'))
+
+    # Additional metrics
+    hv_w = evo.compute_hypervolume(weighted_ranked[:20])
+    hv_rl = evo.compute_hypervolume(rl_ranked[:20])
+    hv_nsga = evo.compute_hypervolume(nsga_front)
+    hv_hybrid = evo.compute_hypervolume(hybrid_front)
+
+    coverage_hybrid = pareto_coverage(hybrid_front, nsga_front, criteria)
+    coverage_nsga = pareto_coverage(nsga_front, hybrid_front, criteria)
+
+    plot_pareto_3d(nsga_front, evo.objective_keys,
+                   os.path.join(output_dir, 'nsga_pareto3d.png'))
+    plot_pareto_3d(hybrid_front, evo.objective_keys,
+                   os.path.join(output_dir, 'hybrid_pareto3d.png'))
+
+    for name, ranked in [('weighted', weighted_ranked),
+                         ('rl_no_gnn', rl_ranked),
+                         ('nsga2', nsga_front),
+                         ('hybrid', hybrid_front)]:
+        if ranked:
+            scores = attribute_scores(ranked[0], criteria)
+            plot_radar(scores, os.path.join(output_dir, f'{name}_radar.png'))
+
+    plt.figure()
+    plt.plot(rewards_hybrid)
+    plt.xlabel('Episode')
+    plt.ylabel('Reward')
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'hybrid_rewards.png'))
+
+    metrics = {
+        'weighted': {'ndcg': ndcg_w, 'map': map_w, 'hv': hv_w},
+        'rl_no_gnn': {'ndcg': ndcg_rl, 'map': map_rl, 'hv': hv_rl},
+        'nsga2': {'ndcg': ndcg_nsga, 'map': map_nsga, 'hv': hv_nsga},
+        'hybrid': {'ndcg': ndcg_hybrid, 'map': map_hybrid, 'hv': hv_hybrid}
+    }
+    plot_metric_bars(metrics, 'ndcg', os.path.join(output_dir, 'ndcg_bar.png'))
+    plot_metric_bars(metrics, 'map', os.path.join(output_dir, 'map_bar.png'))
+    plot_metric_bars(metrics, 'hv', os.path.join(output_dir, 'hv_bar.png'))
+
+    with open(os.path.join(output_dir, 'coverage.json'), 'w', encoding='utf-8') as f:
+        json.dump({'hybrid_vs_nsga': coverage_hybrid, 'nsga_vs_hybrid': coverage_nsga}, f, ensure_ascii=False, indent=4)
+    with open(os.path.join(output_dir, 'metrics.json'), 'w', encoding='utf-8') as f:
+        json.dump(metrics, f, ensure_ascii=False, indent=4)
+
+    return metrics
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Evaluate all methods')
+    parser.add_argument('--out', default='eval_plots', help='Output directory')
+    parser.add_argument('--num-runs', type=int, default=1,
+                        help='Number of random preference runs')
+    args = parser.parse_args()
+    if args.num_runs <= 1:
+        run_evaluation(args.out)
+    else:
+        all_houses = load_houses('updated_houses_with_price_history.json')
+        stats_all = compute_statistics(all_houses)
+        house_types = set(h.get('house_type', '') for h in all_houses
+                          if h.get('house_type'))
+        metrics_list = []
+        for i in range(args.num_runs):
+            w, c = generate_random_prefs(stats_all, house_types)
+            m = run_evaluation(os.path.join(args.out, f'run_{i+1}'),
+                               weights_override=w,
+                               criteria_override=c,
+                               prefs_override={'weights': w})
+            metrics_list.append(m)
+        methods = metrics_list[0].keys() if metrics_list else []
+        avg = {}
+        for m in methods:
+            avg[m] = {
+                'ndcg': float(np.mean([r[m]['ndcg'] for r in metrics_list])),
+                'map': float(np.mean([r[m]['map'] for r in metrics_list])),
+                'hv': float(np.mean([r[m]['hv'] for r in metrics_list]))
+            }
+        os.makedirs(args.out, exist_ok=True)
+        with open(os.path.join(args.out, 'average_metrics.json'), 'w',
+                  encoding='utf-8') as f:
+            json.dump({'metrics': avg, 'runs': len(metrics_list)}, f,
+                      ensure_ascii=False, indent=4)
+        plot_metric_bars(avg, 'ndcg', os.path.join(args.out, 'avg_ndcg_bar.png'))
+        plot_metric_bars(avg, 'map', os.path.join(args.out, 'avg_map_bar.png'))
+        plot_metric_bars(avg, 'hv', os.path.join(args.out, 'avg_hv_bar.png'))
+
+
+if __name__ == '__main__':
+    main()
+
+
+# evolutionary_optimizer.py
+import random
+import json
+
+import matplotlib.pyplot as plt
+
+
+
+class EvolutionaryOptimizer:
+    """多目标进化优化，用于逼近帕累托前沿"""
+
+    def __init__(self, criteria: dict):
+        self.criteria = criteria
+        self.objective_keys = ['price', 'bedrooms', 'bathrooms', 'area']
+        if criteria.get('school_nearby', False):
+            self.objective_keys.append('distance_to_nearest_school')
+        if criteria.get('hospital_nearby', False):
+            self.objective_keys.append('distance_to_nearest_hospital')
+
+    def evaluate_objectives(self, house: dict) -> list:
+        values = []
+        for key in self.objective_keys:
+            if house.get(key) is None:
+                values.append(float('inf'))
+                continue
+            val = house[key]
+            if key in ['bedrooms', 'bathrooms', 'area']:
+                values.append(-float(val))
+            else:
+                values.append(float(val))
+        return values
+
+    def dominates(self, a: dict, b: dict) -> bool:
+        va = self.evaluate_objectives(a)
+        vb = self.evaluate_objectives(b)
+        better_or_equal = all(x <= y for x, y in zip(va, vb))
+        strictly_better = any(x < y for x, y in zip(va, vb))
+        return better_or_equal and strictly_better
+
+    def find_pareto_front(self, houses: list) -> list:
+        front = []
+        for h in houses:
+            dominated = False
+            for other in houses:
+                if other is h:
+                    continue
+                if self.dominates(other, h):
+                    dominated = True
+                    break
+            if not dominated:
+                front.append(h)
+        return front
+
+    def compute_hypervolume(self, houses: list) -> float:
+        """简单计算价格-面积二维下的超体积 (越大越好)"""
+        points = []
+        for h in houses:
+            if h.get('price') is None or h.get('area') is None:
+                continue
+            points.append((float(h['price']), -float(h['area'])))
+        if not points:
+            return 0.0
+        ref_price = max(p[0] for p in points) * 1.1
+        ref_area = min(p[1] for p in points) * 1.1
+        pts = sorted(points, key=lambda x: x[0])
+        hv = 0.0
+        prev_y = ref_area
+        for x, y in pts:
+            hv += max(0.0, ref_price - x) * max(0.0, prev_y - y)
+            prev_y = y
+        return hv
+
+    def optimize_nsga2(self, houses: list, generations: int = 50, population_size: int = 20,
+                        track: bool = False):
+        """运行简化的 NSGA-II, 可选记录每代的超体积
+        打印每一代的进度信息
+        """
+        if not houses:
+            return [] if not track else ([], [])
+        population = random.sample(houses, min(population_size, len(houses)))
+        history = []
+        for gen in range(generations):
+            new_pop = population.copy()
+            pareto = self.find_pareto_front(population)
+            while len(new_pop) < population_size:
+                new_pop.append(random.choice(pareto))
+            if random.random() < 0.3:
+                remaining = [h for h in houses if h not in new_pop]
+                if remaining:
+                    new_pop[random.randrange(len(new_pop))] = random.choice(remaining)
+            population = new_pop
+            if track:
+                history.append(self.compute_hypervolume(population))
+            print(f'NSGA-II generation {gen + 1}/{generations} completed')
+        final_front = []
+        seen = set()
+        for h in self.find_pareto_front(population):
+            hid = h.get('id')
+            if hid not in seen:
+                final_front.append(h)
+                seen.add(hid)
+        if track:
+            return final_front, history
+        return final_front
+
+    def optimize_moead(self, houses: list, population_size: int = 20) -> list:
+        if not houses:
+            return []
+        dim = len(self.objective_keys)
+        solutions = []
+        for _ in range(population_size):
+            weights = [random.random() for _ in range(dim)]
+            total = sum(weights)
+            weights = [w / total for w in weights] if total > 0 else [1.0 / dim] * dim
+            best_house = None
+            best_val = float('inf')
+            for h in houses:
+                obj_vals = self.evaluate_objectives(h)
+                val = sum(w * v for w, v in zip(weights, obj_vals))
+                if val < best_val:
+                    best_val = val
+                    best_house = h
+            if best_house:
+                solutions.append(best_house)
+        return self.find_pareto_front(solutions)
+
+    def optimize_hybrid(self, houses: list, generations: int = 50, population_size: int = 20,
+                        track: bool = False):
+        """NSGA-II 与 MOEA/D 协同优化，track=True 时返回超体积历史
+        在两个阶段之间打印进度信息
+        """
+        print('Hybrid optimization: running NSGA-II stage')
+        if track:
+            nsga_front, history = self.optimize_nsga2(
+                houses, generations, population_size, track=True)
+        else:
+            nsga_front = self.optimize_nsga2(houses, generations, population_size)
+            history = []
+        print('Hybrid optimization: running MOEA/D stage')
+        moead = self.optimize_moead(houses, population_size)
+        final_front = self.find_pareto_front(nsga_front + moead)
+        return (final_front, history) if track else final_front
+
+    def export_front_points(self, front: list, path: str = 'pareto_points.json', plot: bool = True) -> list:
+        """保存帕累托前沿解集各目标取值，并可绘制前两目标散点图"""
+        points = []
+        for h in front:
+            pt = []
+            for k in self.objective_keys:
+                pt.append(h.get(k, float('inf')))
+            points.append(pt)
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump({'objectives': self.objective_keys, 'points': points}, f, ensure_ascii=False, indent=4)
+        if plot and len(self.objective_keys) >= 2 and points:
+            x, y = zip(*[(p[0], p[1]) for p in points])
+            plt.figure()
+            plt.scatter(x, y)
+            plt.xlabel(self.objective_keys[0])
+            plt.ylabel(self.objective_keys[1])
+            plt.tight_layout()
+            img_path = path.replace('.json', '.png')
+            plt.savefig(img_path)
+        return points
+
+
+def optimize_with_hybrid(houses: list, criteria: dict, generations: int = 50, population_size: int = 20,
+                         save_pareto_path: str | None = None, track: bool = False):
+    """运行混合进化算法，可选地保存帕累托前沿数据/图并返回超体积历史"""
+    optimizer = EvolutionaryOptimizer(criteria)
+    result = optimizer.optimize_hybrid(houses, generations, population_size, track=track)
+    if track:
+        front, history = result
+    else:
+        front, history = result, []
+    if save_pareto_path:
+        optimizer.export_front_points(front, save_pareto_path)
+    return (front, history) if track else front
+
+
+
+# experiments.py
+import argparse
+from data_loader import load_data
+from graph_builder import build_graph
+from gnn_model import train_gnn
+from evolutionary_optimizer import EvolutionaryOptimizer, optimize_with_hybrid
+from rl_agent import RLRanker
+from utils import rank_properties, calculate_score
+
+
+def prepare_embeddings(houses, schools, hospitals, state_dim=32):
+    graph = build_graph(houses, schools, hospitals)
+    embeddings = train_gnn(graph, embedding_dim=state_dim, epochs=100)
+    for h in houses:
+        hid = h['id']
+        if hid < len(embeddings):
+            h['embedding'] = embeddings[hid]
+        else:
+            h['embedding'] = [0.0] * state_dim
+
+
+def weighted_only():
+    houses, schools, hospitals, prefs, criteria = load_data(
+        'updated_houses_with_price_history.json',
+        'facilities.geojson',
+        'user_preferences.json',
+        'updated_criteria.json'
+    )
+    scored = rank_properties(houses, criteria, prefs.get('weights', {}), top_n=10)
+    print('Top results (weighted sort):')
+    for h, s in scored:
+        print(h.get('address'), s)
+
+
+def evolution_only():
+    houses, schools, hospitals, prefs, criteria = load_data(
+        'updated_houses_with_price_history.json',
+        'facilities.geojson',
+        'user_preferences.json',
+        'updated_criteria.json'
+    )
+    optimizer = EvolutionaryOptimizer(criteria)
+    front = optimizer.optimize_nsga2(houses)
+    scored = rank_properties(front, criteria, prefs.get('weights', {}), top_n=10)
+    optimizer.export_front_points(front, 'evolution_pareto.json')
+    print('Top results (evolution only):')
+    for h, s in scored:
+        print(h.get('address'), s)
+
+
+def rl_only():
+    houses, schools, hospitals, prefs, criteria = load_data(
+        'updated_houses_with_price_history.json',
+        'facilities.geojson',
+        'user_preferences.json',
+        'updated_criteria.json'
+    )
+    prepare_embeddings(houses, schools, hospitals)
+    ranker = RLRanker(criteria, prefs, state_dim=32)
+    ranker.train(houses, episodes=100, verbose=True)
+    ranked = ranker.rank(houses)[:10]
+    print('Top results (RL only):')
+    for h in ranked:
+        score = calculate_score(h, criteria, prefs.get('weights', {}))
+        print(h.get('address'), score)
+
+
+def hybrid():
+    houses, schools, hospitals, prefs, criteria = load_data(
+        'updated_houses_with_price_history.json',
+        'facilities.geojson',
+        'user_preferences.json',
+        'updated_criteria.json'
+    )
+    candidates = optimize_with_hybrid(houses, criteria, save_pareto_path='hybrid_pareto.json')
+    if not candidates:
+        candidates = houses
+    prepare_embeddings(candidates, schools, hospitals)
+    ranker = RLRanker(criteria, prefs, state_dim=32)
+    ranker.train(candidates, episodes=100, verbose=True)
+    ranked = ranker.rank(candidates)[:10]
+    print('Top results (hybrid):')
+    for h in ranked:
+        score = calculate_score(h, criteria, prefs.get('weights', {}))
+        print(h.get('address'), score)
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Run comparison experiments')
+    parser.add_argument('mode', choices=['weighted', 'evolution', 'rl', 'hybrid'])
+    args = parser.parse_args()
+
+    if args.mode == 'weighted':
+        weighted_only()
+    elif args.mode == 'evolution':
+        evolution_only()
+    elif args.mode == 'rl':
+        rl_only()
+    else:
+        hybrid()
+
+
+if __name__ == '__main__':
+    main()
+
+
+# gnn_model.py
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch_geometric.nn import GCNConv
+
+
+class HouseGCN(nn.Module):
+    """两层GCN提取房产节点嵌入"""
+
+    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int):
+        super().__init__()
+        self.conv1 = GCNConv(input_dim, hidden_dim)
+        self.conv2 = GCNConv(hidden_dim, output_dim)
+
+    def forward(self, x, edge_index, edge_weight=None):
+        x = self.conv1(x, edge_index, edge_weight=edge_weight).relu()
+        x = self.conv2(x, edge_index, edge_weight=edge_weight)
+        return x
+
+
+def train_gnn(graph, embedding_dim: int = 32, epochs: int = 100) -> list:
+    """在异构图上训练GCN模型并返回房产嵌入
+    每个epoch打印一次进度
+    """
+    house_ids = [int(n.split('_')[1]) for n, d in graph.nodes(data=True) if d.get('node_type') == 'house']
+    house_count = max(house_ids) + 1 if house_ids else 0
+    school_nodes = [n for n, d in graph.nodes(data=True) if d.get('facility_type') == 'school']
+    hospital_nodes = [n for n, d in graph.nodes(data=True) if d.get('facility_type') == 'hospital']
+    school_count = len(school_nodes)
+    hospital_count = len(hospital_nodes)
+    total_nodes = house_count + school_count + hospital_count
+
+    features = torch.zeros((total_nodes, 6), dtype=torch.float)
+    for n, data in graph.nodes(data=True):
+        if data.get('node_type') == 'house':
+            hid = int(n.split('_')[1])
+            features[hid, 0] = float(data.get('price_norm', 0.0))
+            features[hid, 1] = float(data.get('bedrooms_norm', 0.0))
+            features[hid, 2] = float(data.get('bathrooms_norm', 0.0))
+            features[hid, 3] = float(data.get('area_norm', 0.0))
+        else:
+            if data.get('facility_type') == 'school':
+                idx = house_count + int(n.split('_')[1])
+                features[idx, 4] = 1.0
+            elif data.get('facility_type') == 'hospital':
+                idx = house_count + school_count + int(n.split('_')[1])
+                features[idx, 5] = 1.0
+
+    edges = []
+    weights = []
+    for u, v, data in graph.edges(data=True):
+        if u.startswith('house') and v.startswith('house'):
+            continue
+        if u.startswith('house'):
+            house_node, fac_node = u, v
+        elif v.startswith('house'):
+            house_node, fac_node = v, u
+        else:
+            continue
+        hid = int(house_node.split('_')[1])
+        if fac_node.startswith('school'):
+            fid = house_count + int(fac_node.split('_')[1])
+        else:
+            fid = house_count + school_count + int(fac_node.split('_')[1])
+        w = float(data.get('weight', 1.0))
+        edges.append([hid, fid])
+        weights.append(w)
+        edges.append([fid, hid])
+        weights.append(w)
+
+    edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous() if edges else torch.empty((2, 0), dtype=torch.long)
+    edge_weight = torch.tensor(weights, dtype=torch.float) if edges else torch.empty((0,), dtype=torch.float)
+
+    input_dim = features.size(1)
+    model = HouseGCN(input_dim, 32, embedding_dim)
+    optimizer = optim.Adam(model.parameters(), lr=0.01)
+
+    model.train()
+    for epoch in range(epochs):
+        optimizer.zero_grad()
+        embed = model(features, edge_index, edge_weight)
+        pos, neg = [], []
+        for u, v in graph.edges():
+            if u.startswith('house'):
+                hid, fid_node = int(u.split('_')[1]), v
+            else:
+                hid, fid_node = int(v.split('_')[1]), u
+            if fid_node.startswith('school'):
+                fid = house_count + int(fid_node.split('_')[1])
+            else:
+                fid = house_count + school_count + int(fid_node.split('_')[1])
+            pos.append(torch.sigmoid((embed[hid] * embed[fid]).sum()))
+        import random
+        house_indices = [int(n.split('_')[1]) for n in graph.nodes() if n.startswith('house')]
+        for _ in range(len(graph.edges())):
+            if not house_indices or (school_count + hospital_count) == 0:
+                break
+            hid = random.choice(house_indices)
+            fid = house_count + random.randrange(school_count + hospital_count)
+            if not ((f'house_{hid}', f'school_{fid - house_count}') in graph.edges() or (f'house_{hid}', f'hospital_{fid - house_count - school_count}') in graph.edges()):
+                neg.append(torch.sigmoid((embed[hid] * embed[fid]).sum()))
+        if not pos:
+            break
+        loss_pos = -torch.stack(pos).log().mean()
+        loss = loss_pos
+        if neg:
+            loss_neg = -(1 - torch.stack(neg)).log().mean()
+            loss += loss_neg
+        loss.backward()
+        optimizer.step()
+        print(f'GNN training epoch {epoch + 1}/{epochs} completed')
+
+    model.eval()
+    with torch.no_grad():
+        final_embed = model(features, edge_index, edge_weight).cpu().numpy()
+    house_embeddings = [final_embed[i].tolist() if i < final_embed.shape[0] else [0.0] * embedding_dim for i in range(house_count)]
+    return house_embeddings
+
+
+
+# graph_builder.py
+import networkx as nx
+from geopy.distance import geodesic
+
+
+def build_graph(houses: list, schools: list, hospitals: list, distance_threshold: float = 20.0) -> nx.Graph:
+    """构建房产-设施异构图，边权反映距离远近"""
+    G = nx.Graph()
+    for house in houses:
+        node_id = f"house_{house['id']}"
+        features = {
+            'node_type': 'house',
+            'price': house.get('price'),
+            'bedrooms': house.get('bedrooms'),
+            'bathrooms': house.get('bathrooms'),
+            'area': house.get('area'),
+            'price_norm': house.get('price_norm', 0.0),
+            'bedrooms_norm': house.get('bedrooms_norm', 0.0),
+            'bathrooms_norm': house.get('bathrooms_norm', 0.0),
+            'area_norm': house.get('area_norm', 0.0),
+            'house_type': house.get('house_type'),
+            'coordinates': house.get('coordinates')
+        }
+        G.add_node(node_id, **features)
+    for idx, (lat, lon) in enumerate(schools):
+        node_id = f"school_{idx}"
+        G.add_node(node_id, node_type='facility', facility_type='school', coordinates=(lat, lon))
+    for idx, (lat, lon) in enumerate(hospitals):
+        node_id = f"hospital_{idx}"
+        G.add_node(node_id, node_type='facility', facility_type='hospital', coordinates=(lat, lon))
+    for house in houses:
+        if not house.get('coordinates'):
+            continue
+        house_node = f"house_{house['id']}"
+        lat, lon = house['coordinates']
+        for idx, (s_lat, s_lon) in enumerate(schools):
+            dist = geodesic((lat, lon), (s_lat, s_lon)).kilometers
+            if dist <= distance_threshold:
+                w = max(0.0, 1 - dist / distance_threshold)
+                G.add_edge(house_node, f"school_{idx}", distance=dist, weight=w)
+        for idx, (h_lat, h_lon) in enumerate(hospitals):
+            dist = geodesic((lat, lon), (h_lat, h_lon)).kilometers
+            if dist <= distance_threshold:
+                w = max(0.0, 1 - dist / distance_threshold)
+                G.add_edge(house_node, f"hospital_{idx}", distance=dist, weight=w)
+    return G
+
+
+
+# interactive_demo.py
+import argparse
+import json
+from data_loader import load_user_preferences, load_criteria, load_data
+from utils import parse_natural_language, apply_adjustments, calculate_score
+from evolutionary_optimizer import optimize_with_hybrid
+from graph_builder import build_graph
+from gnn_model import train_gnn
+from rl_agent import RLRanker
+
+
+def run_pipeline():
+    houses, schools, hospitals, prefs, criteria = load_data(
+        'updated_houses_with_price_history.json',
+        'facilities.geojson',
+        'user_preferences.json',
+        'updated_criteria.json'
+    )
+    candidates = optimize_with_hybrid(houses, criteria)
+    if not candidates:
+        candidates = houses
+    graph = build_graph(candidates, schools, hospitals)
+    embeddings = train_gnn(graph, embedding_dim=32, epochs=100)
+    for h in candidates:
+        hid = h['id']
+        h['embedding'] = embeddings[hid] if hid < len(embeddings) else [0.0] * 16
+    ranker = RLRanker(criteria, prefs, state_dim=32)
+    ranker.train(candidates, episodes=100, verbose=True)
+    ranked = ranker.rank(candidates)[:5]
+    for h in ranked:
+        score = calculate_score(h, criteria, prefs.get('weights', {}))
+        print(h.get('address'), score)
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Interactive preference update')
+    parser.add_argument('--file', default='adjust_order.json',
+                        help='JSON file containing natural language description or adjustment dict')
+    parser.add_argument('--nl', type=str, help='Natural language text directly')
+    args = parser.parse_args()
+
+    if args.nl:
+        text = args.nl
+        adjust = parse_natural_language(text)
+    else:
+        with open(args.file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            if 'text' in data:
+                text = data['text']
+                adjust = parse_natural_language(text)
+            else:
+                adjust = data
+
+    prefs = load_user_preferences('user_preferences.json')
+    crit = load_criteria('updated_criteria.json')
+    apply_adjustments(crit, prefs, adjust)
+
+    run_pipeline()
+
+
+if __name__ == '__main__':
+    main()
+
+
+# mass_evaluate.py
+import os
+import random
+import json
+import numpy as np
+import matplotlib.pyplot as plt
+import torch
+
+from data_loader import load_houses, load_facilities, filter_houses
+from utils import compute_statistics, normalize_features, rank_properties
+from evolutionary_optimizer import EvolutionaryOptimizer, optimize_with_hybrid
+from rl_agent import RLRanker
+from graph_builder import build_graph
+from gnn_model import train_gnn
+from evaluation import evaluate_ranking, prepare_simple_embeddings, plot_metric_bars
+
+torch.set_num_threads(8)
+os.environ.setdefault("OMP_NUM_THREADS", "8")
+
+
+def generate_random_prefs(stats, house_types):
+    weights = {
+        'price': random.random(),
+        'bedrooms': random.random(),
+        'bathrooms': random.random(),
+        'area': random.random(),
+        'house_type': random.random(),
+        'hospital_nearby': random.random(),
+        'school_nearby': random.random()
+    }
+    criteria = {
+        'price': sorted(random.sample([stats['price'][0], stats['price'][1],
+                                      random.uniform(stats['price'][0], stats['price'][1])], 2)),
+        'bedrooms': sorted(random.sample([stats['bedrooms'][0], stats['bedrooms'][1],
+                                         random.uniform(stats['bedrooms'][0], stats['bedrooms'][1])], 2)),
+        'bathrooms': sorted(random.sample([stats['bathrooms'][0], stats['bathrooms'][1],
+                                          random.uniform(stats['bathrooms'][0], stats['bathrooms'][1])], 2)),
+    }
+    if 'area' in stats:
+        criteria['area'] = sorted(random.sample([stats['area'][0], stats['area'][1],
+                                                 random.uniform(stats['area'][0], stats['area'][1])], 2))
+    criteria['house_type'] = random.choice(list(house_types)) if house_types else ''
+    criteria['hospital_nearby'] = random.choice([True, False])
+    criteria['school_nearby'] = random.choice([True, False])
+    return weights, criteria
+
+
+def evaluate_one(all_houses, schools, hospitals, weights, criteria):
+    houses = filter_houses(list(all_houses), criteria, schools, hospitals)
+    if not houses:
+        return None
+    stats = compute_statistics(houses)
+    normalize_features(houses, stats)
+
+    evo = EvolutionaryOptimizer(criteria)
+
+    weighted_ranked = [h for h, _ in rank_properties(houses, criteria, weights)]
+    ndcg_w, map_w = evaluate_ranking(weighted_ranked, houses, criteria, weights)
+    hv_w = evo.compute_hypervolume(weighted_ranked[:20])
+
+    prepare_simple_embeddings(houses)
+    rl_agent = RLRanker(criteria, {'weights': weights}, state_dim=4)
+    rl_agent.train(houses, episodes=50)
+    rl_ranked = rl_agent.rank(houses)
+    ndcg_rl, map_rl = evaluate_ranking(rl_ranked, houses, criteria, weights)
+    hv_rl = evo.compute_hypervolume(rl_ranked[:20])
+
+    nsga_front = evo.optimize_nsga2(houses)
+    ndcg_nsga, map_nsga = evaluate_ranking(nsga_front, houses, criteria, weights)
+    hv_nsga = evo.compute_hypervolume(nsga_front)
+
+    hybrid_front = optimize_with_hybrid(houses, criteria)
+    if not hybrid_front:
+        hybrid_front = houses
+    graph = build_graph(hybrid_front, schools, hospitals)
+    embeddings = train_gnn(graph, embedding_dim=32, epochs=50)
+    for h in hybrid_front:
+        hid = h['id']
+        h['embedding'] = embeddings[hid] if hid < len(embeddings) else [0.0] * 32
+    ranker = RLRanker(criteria, {'weights': weights}, state_dim=32)
+    ranker.train(hybrid_front, episodes=50)
+    hybrid_ranked = ranker.rank(hybrid_front)
+    ndcg_h, map_h = evaluate_ranking(hybrid_ranked, houses, criteria, weights)
+    hv_h = evo.compute_hypervolume(hybrid_front)
+
+    return {
+        'weighted': {'ndcg': ndcg_w, 'map': map_w, 'hv': hv_w},
+        'rl_no_gnn': {'ndcg': ndcg_rl, 'map': map_rl, 'hv': hv_rl},
+        'nsga2': {'ndcg': ndcg_nsga, 'map': map_nsga, 'hv': hv_nsga},
+        'hybrid': {'ndcg': ndcg_h, 'map': map_h, 'hv': hv_h}
+    }
+
+
+def main():
+    all_houses = load_houses('updated_houses_with_price_history.json')
+    schools, hospitals = load_facilities('facilities.geojson')
+    stats_all = compute_statistics(all_houses)
+    house_types = set(h.get('house_type', '') for h in all_houses if h.get('house_type'))
+
+    results = []
+    for _ in range(50):
+        weights, criteria = generate_random_prefs(stats_all, house_types)
+        metrics = evaluate_one(all_houses, schools, hospitals, weights, criteria)
+        if metrics:
+            results.append(metrics)
+
+    if not results:
+        print('No valid evaluations generated')
+        return
+
+    methods = ['weighted', 'rl_no_gnn', 'nsga2', 'hybrid']
+    avg = {}
+    for m in methods:
+        avg[m] = {
+            'ndcg': float(np.mean([r[m]['ndcg'] for r in results])),
+            'map': float(np.mean([r[m]['map'] for r in results])),
+            'hv': float(np.mean([r[m]['hv'] for r in results]))
+        }
+
+    with open('random_eval_summary.json', 'w', encoding='utf-8') as f:
+        json.dump({'average_metrics': avg, 'samples': len(results)}, f,
+                  ensure_ascii=False, indent=4)
+
+    plot_metric_bars(avg, 'ndcg', 'random_ndcg_bar.png')
+    plot_metric_bars(avg, 'map', 'random_map_bar.png')
+    plot_metric_bars(avg, 'hv', 'random_hv_bar.png')
+    print('Saved random_eval_summary.json and metric bar charts')
+
+
+if __name__ == '__main__':
+    main()
+
+
+# rl_agent.py
+import random
+from collections import deque
+from typing import List
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+
+from utils import calculate_score
+
+
+class QNetwork(nn.Module):
+    def __init__(self, state_dim: int, hidden_dim: int, action_dim: int = 2):
+        super().__init__()
+        self.model = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, action_dim)
+        )
+
+    def forward(self, x):
+        return self.model(x)
+
+
+class ReplayBuffer:
+    def __init__(self, capacity: int = 10000):
+        self.buffer = deque(maxlen=capacity)
+
+    def push(self, *transition):
+        self.buffer.append(transition)
+
+    def sample(self, batch_size: int):
+        batch = random.sample(self.buffer, batch_size)
+        state, action, reward, next_state, done = map(list, zip(*batch))
+        return (torch.stack(state),
+                torch.tensor(action, dtype=torch.long),
+                torch.tensor(reward, dtype=torch.float),
+                torch.stack(next_state),
+                torch.tensor(done, dtype=torch.float))
+
+    def __len__(self):
+        return len(self.buffer)
+
+
+class DQNAgent:
+    def __init__(self, state_dim: int, hidden_dim: int = 64, lr: float = 5e-4,
+                 gamma: float = 0.99, epsilon_start: float = 1.0,
+                 epsilon_end: float = 0.05, epsilon_decay: float = 0.995,
+                 buffer_size: int = 10000, batch_size: int = 32,
+                 target_update: int = 10, double_dqn: bool = True):
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.policy_net = QNetwork(state_dim, hidden_dim).to(self.device)
+        self.target_net = QNetwork(state_dim, hidden_dim).to(self.device)
+        self.target_net.load_state_dict(self.policy_net.state_dict())
+        self.optimizer = optim.Adam(self.policy_net.parameters(), lr=lr)
+        self.gamma = gamma
+        self.epsilon = epsilon_start
+        self.epsilon_end = epsilon_end
+        self.epsilon_decay = epsilon_decay
+        self.batch_size = batch_size
+        self.target_update = target_update
+        self.memory = ReplayBuffer(buffer_size)
+        self.steps = 0
+        self.double_dqn = double_dqn
+
+    def select_action(self, state: torch.Tensor) -> int:
+        self.epsilon = max(self.epsilon_end, self.epsilon * self.epsilon_decay)
+        if random.random() < self.epsilon:
+            return random.randrange(2)
+        with torch.no_grad():
+            q_values = self.policy_net(state.to(self.device))
+            return int(torch.argmax(q_values).item())
+
+    def store(self, state, action, reward, next_state, done):
+        self.memory.push(state.cpu(), action, reward, next_state.cpu(), done)
+
+    def train_step(self):
+        if len(self.memory) < self.batch_size:
+            return
+        states, actions, rewards, next_states, dones = self.memory.sample(self.batch_size)
+        states = states.to(self.device)
+        next_states = next_states.to(self.device)
+        actions = actions.to(self.device)
+        rewards = rewards.to(self.device)
+        dones = dones.to(self.device)
+
+        q_values = self.policy_net(states).gather(1, actions.unsqueeze(1)).squeeze()
+        with torch.no_grad():
+            if self.double_dqn:
+                next_actions = self.policy_net(next_states).argmax(1)
+                next_q = self.target_net(next_states).gather(1, next_actions.unsqueeze(1)).squeeze()
+            else:
+                next_q = self.target_net(next_states).max(1)[0]
+        target = rewards + (1 - dones) * self.gamma * next_q
+        loss = nn.functional.mse_loss(q_values, target)
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+        self.steps += 1
+        if self.steps % self.target_update == 0:
+            self.target_net.load_state_dict(self.policy_net.state_dict())
+
+
+class RLRanker:
+    """使用DQN根据用户偏好对房产进行排序"""
+
+    def __init__(self, criteria: dict, preferences: dict, state_dim: int):
+        self.criteria = criteria
+        self.weights = preferences.get('weights', {})
+        eps_start = preferences.get('epsilon_start', 1.0)
+        eps_end = preferences.get('epsilon_end', 0.05)
+        eps_decay = preferences.get('epsilon_decay', 0.995)
+        self.diversity_weight = preferences.get('diversity_weight', 0.1)
+        self.agent = DQNAgent(state_dim, lr=5e-4,
+                              epsilon_start=eps_start,
+                              epsilon_end=eps_end,
+                              epsilon_decay=eps_decay,
+                              double_dqn=True)
+
+    def train(self, houses: List[dict], episodes: int = 100, verbose: bool = False) -> list:
+        """训练 DQN 并返回每个 episode 的平均加权得分"""
+        episode_scores = []
+        for ep in range(episodes):
+            total = 0.0
+            visited = set()
+            random.shuffle(houses)
+            for i, house in enumerate(houses):
+                state = torch.tensor(house['embedding'], dtype=torch.float)
+                action = self.agent.select_action(state)
+                base = calculate_score(house, self.criteria, self.weights) if action == 1 else 0.0
+                bonus = 0.0
+                if action == 1 and house['id'] not in visited:
+                    bonus = self.diversity_weight * (1.0 - len(visited) / len(houses))
+                    visited.add(house['id'])
+                reward = base + bonus
+                done = i == len(houses) - 1
+                next_state = torch.tensor(houses[(i + 1) % len(houses)]['embedding'], dtype=torch.float)
+                self.agent.store(state, action, reward, next_state, float(done))
+                self.agent.train_step()
+                total += base
+            avg_score = total / max(1, len(houses))
+            episode_scores.append(avg_score)
+            if verbose:
+                print(f'Episode {ep + 1}: score={avg_score:.2f}')
+        return episode_scores
+
+    def rank(self, houses: List[dict]) -> List[dict]:
+        scored = []
+        for house in houses:
+            state = torch.tensor(house['embedding'], dtype=torch.float)
+            with torch.no_grad():
+                q = self.agent.policy_net(state)
+            scored.append((house, q[1].item()))
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return [h for h, _ in scored]
+
+    def rank_with_scores(self, houses: List[dict]) -> List[tuple]:
+        """返回按得分排序的 (house, score) 列表"""
+        scored = []
+        for house in houses:
+            state = torch.tensor(house['embedding'], dtype=torch.float)
+            with torch.no_grad():
+                q = self.agent.policy_net(state)
+            scored.append((house, q[1].item()))
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored
+
+    def update_weights(self, weights: dict) -> None:
+        """在训练过程中动态调整权重"""
+        self.weights = weights
+
+
+
+# spatial_context_analysis.py
+import json
+import math
+import numpy as np
+import matplotlib.pyplot as plt
+from geopy.distance import geodesic
+
+from data_loader import load_data
+from utils import calculate_score
+from graph_builder import build_graph
+from gnn_model import train_gnn
+from rl_agent import RLRanker
+from evaluation import prepare_simple_embeddings
+
+
+def neighborhood_consistency(scored, d=2.0, epsilon=0.1):
+    pairs = 0
+    consistent = 0
+    for i in range(len(scored)):
+        hi, si = scored[i]
+        if 'coordinates' not in hi or hi['coordinates'] is None:
+            continue
+        for j in range(i + 1, len(scored)):
+            hj, sj = scored[j]
+            if 'coordinates' not in hj or hj['coordinates'] is None:
+                continue
+            dist = geodesic(hi['coordinates'], hj['coordinates']).kilometers
+            if dist < d:
+                pairs += 1
+                if abs(si - sj) < epsilon:
+                    consistent += 1
+    if pairs == 0:
+        return 0.0
+    return math.log(consistent + 1) / math.log(pairs + 1)
+
+
+def spatial_coverage(recommended, m=10, n=10):
+    coords = [h['coordinates'] for h in recommended if h.get('coordinates')]
+    if not coords:
+        return 0.0
+    lats = [c[0] for c in coords]
+    lons = [c[1] for c in coords]
+    lat_min, lat_max = min(lats), max(lats)
+    lon_min, lon_max = min(lons), max(lons)
+    grid = np.zeros((m, n))
+    for h in recommended:
+        if not h.get('coordinates'):
+            continue
+        lat, lon = h['coordinates']
+        i = min(int((lat - lat_min) / (lat_max - lat_min + 1e-6) * m), m - 1)
+        j = min(int((lon - lon_min) / (lon_max - lon_min + 1e-6) * n), n - 1)
+        grid[i, j] += 1
+    return np.std(grid)
+
+
+def boxplot_diffs(b_scores, g_scores, d=2.0):
+    b_diffs = []
+    g_diffs = []
+    for i, (hi, bi) in enumerate(b_scores):
+        if not hi.get('coordinates'):
+            continue
+        for j in range(i + 1, len(b_scores)):
+            hj, bj = b_scores[j]
+            if not hj.get('coordinates'):
+                continue
+            dist = geodesic(hi['coordinates'], hj['coordinates']).kilometers
+            if dist < d:
+                b_diffs.append(abs(bi - bj))
+    for i, (hi, gi) in enumerate(g_scores):
+        if not hi.get('coordinates'):
+            continue
+        for j in range(i + 1, len(g_scores)):
+            hj, gj = g_scores[j]
+            if not hj.get('coordinates'):
+                continue
+            dist = geodesic(hi['coordinates'], hj['coordinates']).kilometers
+            if dist < d:
+                g_diffs.append(abs(gi - gj))
+    plt.figure()
+    plt.boxplot([b_diffs, g_diffs], labels=['Baseline', 'GNN'])
+    plt.ylabel('Score diff within cell')
+    plt.tight_layout()
+    plt.savefig('neighbor_consistency_box.png')
+    plt.close()
+
+
+def plot_heatmap(recommended, m=10, n=10, path='heatmap.png'):
+    coords = [h['coordinates'] for h in recommended if h.get('coordinates')]
+    if not coords:
+        return
+    lats = [c[0] for c in coords]
+    lons = [c[1] for c in coords]
+    lat_min, lat_max = min(lats), max(lats)
+    lon_min, lon_max = min(lons), max(lons)
+    grid = np.zeros((m, n))
+    for h in recommended:
+        if not h.get('coordinates'):
+            continue
+        lat, lon = h['coordinates']
+        i = min(int((lat - lat_min) / (lat_max - lat_min + 1e-6) * m), m - 1)
+        j = min(int((lon - lon_min) / (lon_max - lon_min + 1e-6) * n), n - 1)
+        grid[i, j] += 1
+    plt.figure()
+    plt.imshow(grid, origin='lower')
+    plt.colorbar(label='count')
+    plt.tight_layout()
+    plt.savefig(path)
+    plt.close()
+
+
+def map_scatter(b_scores, g_scores, path='map_scatter.png'):
+    plt.figure()
+    for house, _ in b_scores:
+        if house.get('coordinates'):
+            plt.scatter(house['coordinates'][1], house['coordinates'][0], c='blue', marker='o')
+    for house, _ in g_scores:
+        if house.get('coordinates'):
+            plt.scatter(house['coordinates'][1], house['coordinates'][0], c='red', marker='x')
+    plt.xlabel('Longitude')
+    plt.ylabel('Latitude')
+    plt.tight_layout()
+    plt.savefig(path)
+    plt.close()
+
+
+def run(output_json='spatial_metrics.json', top_n=50):
+    houses, schools, hospitals, prefs, criteria = load_data(
+        'updated_houses_with_price_history.json',
+        'facilities.geojson',
+        'user_preferences.json',
+        'updated_criteria.json',
+    )
+
+    # Baseline RL without facilities
+    prepare_simple_embeddings(houses)
+    rl_base = RLRanker(criteria, prefs, state_dim=4)
+    rl_base.train(houses, episodes=50)
+    base_scores = rl_base.rank_with_scores(houses)[:top_n]
+
+    # GNN model
+    graph = build_graph(houses, schools, hospitals)
+    embeddings = train_gnn(graph, embedding_dim=32, epochs=50)
+    for h in houses:
+        hid = h['id']
+        h['embedding'] = embeddings[hid] if hid < len(embeddings) else [0.0] * 32
+    rl_gnn = RLRanker(criteria, prefs, state_dim=32)
+    rl_gnn.train(houses, episodes=50)
+    gnn_scores = rl_gnn.rank_with_scores(houses)[:top_n]
+
+    metrics = {
+        'baseline_nc': neighborhood_consistency(base_scores),
+        'gnn_nc': neighborhood_consistency(gnn_scores),
+        'baseline_cov': spatial_coverage([h for h, _ in base_scores]),
+        'gnn_cov': spatial_coverage([h for h, _ in gnn_scores])
+    }
+
+    map_scatter(base_scores, gnn_scores)
+    boxplot_diffs(base_scores, gnn_scores)
+    plot_heatmap([h for h, _ in gnn_scores], path='gnn_heatmap.png')
+    plot_heatmap([h for h, _ in base_scores], path='baseline_heatmap.png')
+
+    with open(output_json, 'w', encoding='utf-8') as f:
+        json.dump(metrics, f, ensure_ascii=False, indent=4)
+
+
+if __name__ == '__main__':
+    run()
+
+
+# train.py
+import argparse
+import json
+from pprint import pprint
+import os
+import torch
+
+torch.set_num_threads(8)
+os.environ.setdefault("OMP_NUM_THREADS", "8")
+
+from data_loader import load_data, load_user_preferences, load_criteria
+from graph_builder import build_graph
+from gnn_model import train_gnn
+from evolutionary_optimizer import optimize_with_hybrid
+from rl_agent import RLRanker
+from utils import parse_natural_language, apply_adjustments, calculate_score
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Train real estate recommender")
+    parser.add_argument('--nl', type=str, help='\u81ea\u7136\u8bed\u8a00\u504f\u597d\u63cf\u8ff0')
+    args = parser.parse_args()
+
+    if args.nl:
+        prefs = load_user_preferences('user_preferences.json')
+        crit = load_criteria('updated_criteria.json')
+        adj = parse_natural_language(args.nl)
+        apply_adjustments(crit, prefs, adj)
+
+    houses, schools, hospitals, preferences, criteria = load_data(
+        'updated_houses_with_price_history.json',
+        'facilities.geojson',
+        'user_preferences.json',
+        'updated_criteria.json'
+    )
+    if not houses:
+        print('No houses after filtering.')
+        return
+
+    candidate_houses = optimize_with_hybrid(houses, criteria)
+    if not candidate_houses:
+        candidate_houses = houses
+
+    graph = build_graph(candidate_houses, schools, hospitals)
+    embeddings = train_gnn(graph, embedding_dim=32, epochs=100)
+    for h in candidate_houses:
+        hid = h['id']
+        if hid < len(embeddings):
+            h['embedding'] = embeddings[hid]
+        else:
+            h['embedding'] = [0.0] * 32
+
+    ranker = RLRanker(criteria, preferences, state_dim=32)
+    ranker.train(candidate_houses, episodes=100)
+    ranked = ranker.rank(candidate_houses)
+
+    scored = []
+    for h in ranked:
+        score = calculate_score(h, criteria, preferences.get("weights", {}))
+        scored.append({"address": h.get("address"), "score": score})
+    pprint(scored[:10])
+
+if __name__ == '__main__':
+    main()
+
+
+
+# utils.py
+import json
+import re
+
+
+def compute_statistics(houses: list) -> dict:
+    stats = {}
+    if not houses:
+        return stats
+    numeric_fields = ['price', 'bedrooms', 'bathrooms', 'area']
+    for field in numeric_fields:
+        values = []
+        for h in houses:
+            raw = h.get(field)
+            if raw is None:
+                continue
+            try:
+                num = float(raw)
+                if field in ('bedrooms', 'bathrooms'):
+                    num = int(num)
+                h[field] = num
+                values.append(num)
+            except (ValueError, TypeError):
+                continue
+        if values:
+            stats[field] = (min(values), max(values))
+    return stats
+
+
+def normalize_features(houses: list, stats: dict) -> None:
+    for h in houses:
+        for field, (min_val, max_val) in stats.items():
+            val = h.get(field)
+            if val is None:
+                h[f'{field}_norm'] = 0.0
+            else:
+                if max_val > min_val:
+                    h[f'{field}_norm'] = (val - min_val) / (max_val - min_val)
+                else:
+                    h[f'{field}_norm'] = 0.0
+
+
+def parse_natural_language(text: str) -> dict:
+    text = text.lower()
+    adjust = {
+        'price': {'weight': 1, 'size': 1},
+        'bedrooms': {'weight': 1, 'size': 1},
+        'bathrooms': {'weight': 1, 'size': 1},
+        'area': {'weight': 1, 'size': 1},
+        'house_type': {'weight': 1},
+        'hospital_nearby': {'weight': 1},
+        'school_nearby': {'weight': 1}
+    }
+    if '价格' in text or '预算' in text:
+        if any(w in text for w in ['低', '便宜', '降']):
+            adjust['price']['weight'] = 0
+            adjust['price']['size'] = 0
+        elif any(w in text for w in ['高', '贵', '增加']):
+            adjust['price']['weight'] = 2
+            adjust['price']['size'] = 2
+    if '卧室' in text:
+        if any(w in text for w in ['多', '增']):
+            adjust['bedrooms']['weight'] = 2
+            adjust['bedrooms']['size'] = 2
+        elif any(w in text for w in ['少']):
+            adjust['bedrooms']['weight'] = 0
+            adjust['bedrooms']['size'] = 0
+    family_match = re.search(r"(\d+)口人", text)
+    if family_match:
+        adjust['bedrooms']['weight'] = 2
+        adjust['bedrooms']['size'] = 2 if int(family_match.group(1)) > 0 else 1
+    if '卫生间' in text or '浴室' in text:
+        if any(w in text for w in ['多', '增']):
+            adjust['bathrooms']['weight'] = 2
+            adjust['bathrooms']['size'] = 2
+        elif any(w in text for w in ['少']):
+            adjust['bathrooms']['weight'] = 0
+            adjust['bathrooms']['size'] = 0
+    if '面积' in text or '大小' in text:
+        if '大' in text:
+            adjust['area']['weight'] = 2
+            adjust['area']['size'] = 2
+        elif '小' in text:
+            adjust['area']['weight'] = 0
+            adjust['area']['size'] = 0
+    if '别墅' in text:
+        adjust['house_type']['weight'] = 2
+    if '公寓' in text:
+        adjust['house_type']['weight'] = 2
+    if '学校' in text or '学区' in text:
+        adjust['school_nearby']['weight'] = 2
+    if '医院' in text or '医疗' in text:
+        adjust['hospital_nearby']['weight'] = 2
+    return adjust
+
+
+def apply_adjustments(criteria: dict, preferences: dict, adjust: dict, save: bool = True) -> None:
+    weights = preferences.get('weights', {})
+    for key, adj in adjust.items():
+        if key in weights and 'weight' in adj:
+            if adj['weight'] == 2:
+                weights[key] = weights.get(key, 1.0) * 1.25
+            elif adj['weight'] == 0:
+                weights[key] = weights.get(key, 1.0) * 0.75
+        if key in criteria:
+            if isinstance(criteria[key], list) and 'size' in adj:
+                mi, ma = criteria[key]
+                if adj['size'] == 2:
+                    criteria[key] = [mi * 1.2, ma * 1.2]
+                elif adj['size'] == 0:
+                    criteria[key] = [mi * 0.8, ma * 0.8]
+            elif isinstance(criteria[key], bool) and 'weight' in adj:
+                criteria[key] = adj['weight'] == 2
+    preferences['weights'] = weights
+    if save:
+        with open('user_preferences.json', 'w', encoding='utf-8') as f:
+            json.dump(preferences, f, ensure_ascii=False, indent=4)
+        with open('updated_criteria.json', 'w', encoding='utf-8') as f:
+            json.dump(criteria, f, ensure_ascii=False, indent=4)
+
+
+def calculate_score(house: dict, criteria: dict, weights: dict) -> float:
+    score = 0.0
+    for key, weight in weights.items():
+        if not weight:
+            continue
+        if key in ['price', 'bedrooms', 'bathrooms', 'area']:
+            value = house.get(key)
+            if value is None:
+                continue
+            if key in criteria and isinstance(criteria[key], list):
+                mi, ma = criteria[key]
+            else:
+                mi = ma = value
+            if mi <= value <= ma:
+                attr_score = 100.0
+            else:
+                diff = (mi - value) if value < mi else (value - ma)
+                span = ma - mi if ma != mi else (ma if ma != 0 else 1)
+                attr_score = max(0.0, 1 - diff / span) * 100.0
+            score += attr_score * weight
+        elif key == 'house_type':
+            desired = criteria.get('house_type')
+            actual = house.get('house_type')
+            if desired and actual and desired.lower() in str(actual).lower():
+                score += 100.0 * weight
+            else:
+                score += 50.0 * weight
+        elif key in ['hospital_nearby', 'school_nearby']:
+            if not criteria.get(key, False):
+                continue
+            dist = house.get(
+                'distance_to_nearest_hospital' if key == 'hospital_nearby' else 'distance_to_nearest_school',
+                float('inf'))
+            max_d = criteria.get(f'{key}_max_distance', 10.0)
+            if dist == float('inf'):
+                attr_score = 0.0
+            else:
+                attr_score = max(0.0, 1 - dist / max_d) * 100.0
+            score += attr_score * weight
+    return score
+
+
+def rank_properties(houses: list, criteria: dict, weights: dict, top_n: int = None) -> list:
+    scored = []
+    for h in houses:
+        s = calculate_score(h, criteria, weights)
+        scored.append((h, s))
+    scored.sort(key=lambda x: x[1], reverse=True)
+    if top_n is not None:
+        return scored[:top_n]
+    return scored
+
+
+
+# run.sh
+#!/bin/bash
+# Simple helper to install dependencies and run training
+pip install -r requirements.txt
+export OMP_NUM_THREADS=8
+python train.py "$@"
