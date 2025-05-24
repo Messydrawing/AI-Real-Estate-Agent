@@ -109,30 +109,40 @@ class RLRanker:
         self.weights = preferences.get('weights', {})
         eps_start = preferences.get('epsilon_start', 1.0)
         eps_end = preferences.get('epsilon_end', 0.05)
+        eps_decay = preferences.get('epsilon_decay', 0.995)
+        self.diversity_weight = preferences.get('diversity_weight', 0.1)
         self.agent = DQNAgent(state_dim, lr=5e-4,
                               epsilon_start=eps_start,
                               epsilon_end=eps_end,
+                              epsilon_decay=eps_decay,
                               double_dqn=True)
 
     def train(self, houses: List[dict], episodes: int = 100, verbose: bool = False) -> list:
-        """训练 DQN 并返回每个 episode 的累积奖励"""
-        episode_rewards = []
+        """训练 DQN 并返回每个 episode 的平均加权得分"""
+        episode_scores = []
         for ep in range(episodes):
             total = 0.0
+            visited = set()
             random.shuffle(houses)
             for i, house in enumerate(houses):
                 state = torch.tensor(house['embedding'], dtype=torch.float)
                 action = self.agent.select_action(state)
-                reward = calculate_score(house, self.criteria, self.weights) if action == 1 else 0.0
+                base = calculate_score(house, self.criteria, self.weights) if action == 1 else 0.0
+                bonus = 0.0
+                if action == 1 and house['id'] not in visited:
+                    bonus = self.diversity_weight * (1.0 - len(visited) / len(houses))
+                    visited.add(house['id'])
+                reward = base + bonus
                 done = i == len(houses) - 1
                 next_state = torch.tensor(houses[(i + 1) % len(houses)]['embedding'], dtype=torch.float)
                 self.agent.store(state, action, reward, next_state, float(done))
                 self.agent.train_step()
-                total += reward
-            episode_rewards.append(total)
+                total += base
+            avg_score = total / max(1, len(houses))
+            episode_scores.append(avg_score)
             if verbose:
-                print(f'Episode {ep + 1}: reward={total:.2f}')
-        return episode_rewards
+                print(f'Episode {ep + 1}: score={avg_score:.2f}')
+        return episode_scores
 
     def rank(self, houses: List[dict]) -> List[dict]:
         scored = []
@@ -143,4 +153,19 @@ class RLRanker:
             scored.append((house, q[1].item()))
         scored.sort(key=lambda x: x[1], reverse=True)
         return [h for h, _ in scored]
+
+    def rank_with_scores(self, houses: List[dict]) -> List[tuple]:
+        """返回按得分排序的 (house, score) 列表"""
+        scored = []
+        for house in houses:
+            state = torch.tensor(house['embedding'], dtype=torch.float)
+            with torch.no_grad():
+                q = self.agent.policy_net(state)
+            scored.append((house, q[1].item()))
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored
+
+    def update_weights(self, weights: dict) -> None:
+        """在训练过程中动态调整权重"""
+        self.weights = weights
 
