@@ -68,7 +68,8 @@ def evaluate_one(all_houses, schools, hospitals, weights, criteria):
     ndcg_nsga, map_nsga = evaluate_ranking(nsga_front, houses, criteria, weights)
     hv_nsga = evo.compute_hypervolume(nsga_front)
 
-    hybrid_front = optimize_with_hybrid(houses, criteria)
+    hybrid_front = optimize_with_hybrid(
+        houses, criteria, preferences={'weights': weights}, rl_episodes=30)
     if not hybrid_front:
         hybrid_front = houses
     graph = build_graph(hybrid_front, schools, hospitals)

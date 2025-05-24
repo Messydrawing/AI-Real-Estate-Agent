@@ -2,6 +2,7 @@ import random
 import json
 
 from utils import rank_properties
+from rl_agent import RLRanker
 
 import matplotlib.pyplot as plt
 
@@ -142,6 +143,33 @@ class EvolutionaryOptimizer:
         final_front = self.find_pareto_front(nsga_front + moead)
         return (final_front, history) if track else final_front
 
+    def optimize_hybrid_rl(self, houses: list, preferences: dict, generations: int = 30,
+                           population_size: int = 20, rl_episodes: int = 30,
+                           track: bool = False):
+        """NSGA-II 与强化学习协同优化"""
+        print('Hybrid RL optimization: running NSGA-II stage')
+        if track:
+            nsga_front, history = self.optimize_nsga2(
+                houses, generations, population_size, track=True)
+        else:
+            nsga_front = self.optimize_nsga2(houses, generations, population_size)
+            history = []
+
+        state_dim = len(houses[0].get('embedding', [])) if houses else 0
+        if state_dim == 0:
+            for h in houses:
+                h['embedding'] = [h.get('price_norm', 0.0), h.get('bedrooms_norm', 0.0),
+                                  h.get('bathrooms_norm', 0.0), h.get('area_norm', 0.0)]
+            state_dim = 4
+
+        print('Hybrid RL optimization: running RL fine-tuning stage')
+        ranker = RLRanker(self.criteria, preferences, state_dim=state_dim)
+        ranker.train(houses, episodes=rl_episodes)
+        rl_ranked = ranker.rank(houses)[:population_size]
+
+        final_front = self.find_pareto_front(nsga_front + rl_ranked)
+        return (final_front, history) if track else final_front
+
     def export_front_points(self, front: list, path: str = 'pareto_points.json', plot: bool = True) -> list:
         """保存帕累托前沿解集各目标取值，并可绘制前两目标散点图"""
         points = []
@@ -164,11 +192,19 @@ class EvolutionaryOptimizer:
         return points
 
 
-def optimize_with_hybrid(houses: list, criteria: dict, generations: int = 50, population_size: int = 20,
-                         save_pareto_path: str | None = None, track: bool = False):
-    """运行混合进化算法，可选地保存帕累托前沿数据/图并返回超体积历史"""
+def optimize_with_hybrid(houses: list, criteria: dict, generations: int = 50,
+                         population_size: int = 20, save_pareto_path: str | None = None,
+                         preferences: dict | None = None, rl_episodes: int = 30,
+                         track: bool = False):
+    """运行混合进化算法并可选结合 RL 引导, 可保存帕累托前沿数据/图并返回超体积历史"""
     optimizer = EvolutionaryOptimizer(criteria)
-    result = optimizer.optimize_hybrid(houses, generations, population_size, track=track)
+    if preferences is not None:
+        result = optimizer.optimize_hybrid_rl(
+            houses, preferences, generations, population_size,
+            rl_episodes=rl_episodes, track=track)
+    else:
+        result = optimizer.optimize_hybrid(
+            houses, generations, population_size, track=track)
     if track:
         front, history = result
     else:

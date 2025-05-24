@@ -36,7 +36,8 @@ def main():
         print('No houses after filtering.')
         return
 
-    candidate_houses = optimize_with_hybrid(houses, criteria)
+    candidate_houses = optimize_with_hybrid(
+        houses, criteria, preferences=preferences, rl_episodes=50)
     if not candidate_houses:
         candidate_houses = houses
 

@@ -212,7 +212,9 @@ def run_evaluation(output_dir, weights_override=None, criteria_override=None,
 
     # Hybrid
     hybrid_front, hv_hist_hybrid = optimize_with_hybrid(
-        houses, criteria, save_pareto_path=os.path.join(output_dir, 'hybrid_pareto.json'), track=True)
+        houses, criteria,
+        save_pareto_path=os.path.join(output_dir, 'hybrid_pareto.json'),
+        preferences=prefs, rl_episodes=50, track=True)
     prepare_embeddings(houses, schools, hospitals)
     prefs_hybrid = dict(prefs)
     prefs_hybrid['epsilon_decay'] = 0.99

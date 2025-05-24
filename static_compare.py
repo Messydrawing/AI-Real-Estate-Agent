@@ -23,7 +23,9 @@ def run(output_path='method_comparison.png'):
     hv_w = optimizer.compute_hypervolume(weighted_ranked)
 
     # Hybrid method with larger search and slower epsilon decay
-    pareto_front = optimizer.optimize_hybrid(houses, generations=100, population_size=50)
+    pareto_front = optimize_with_hybrid(
+        houses, criteria, generations=100, population_size=50,
+        preferences=prefs_hybrid, rl_episodes=50)
     # Softly reweight candidates to highlight nearby facilities before RL sorting
     reweighted = [h for h, _ in soft_geo_reweight(pareto_front, criteria, weights, factor=1.2)]
     prefs_hybrid = dict(prefs)

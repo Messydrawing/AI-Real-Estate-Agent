@@ -71,7 +71,9 @@ def hybrid():
         'user_preferences.json',
         'updated_criteria.json'
     )
-    candidates = optimize_with_hybrid(houses, criteria, save_pareto_path='hybrid_pareto.json')
+    candidates = optimize_with_hybrid(
+        houses, criteria, save_pareto_path='hybrid_pareto.json',
+        preferences=prefs, rl_episodes=50)
     if not candidates:
         candidates = houses
     prepare_embeddings(candidates, schools, hospitals)
