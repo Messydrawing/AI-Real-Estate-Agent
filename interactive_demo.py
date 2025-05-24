@@ -15,7 +15,8 @@ def run_pipeline():
         'user_preferences.json',
         'updated_criteria.json'
     )
-    candidates = optimize_with_hybrid(houses, criteria)
+    candidates = optimize_with_hybrid(
+        houses, criteria, preferences=prefs, rl_episodes=50)
     if not candidates:
         candidates = houses
     graph = build_graph(candidates, schools, hospitals)
