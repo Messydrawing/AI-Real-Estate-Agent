@@ -5,6 +5,10 @@ import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+import torch
+
+torch.set_num_threads(8)
+os.environ.setdefault("OMP_NUM_THREADS", "8")
 
 from data_loader import load_data
 from utils import calculate_score, rank_properties
