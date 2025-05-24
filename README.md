@@ -89,6 +89,13 @@ python interactive_demo.py --nl "希望房子更大并靠近医院"
 python evaluation.py --out eval_plots
 ```
 
+如需多次随机生成偏好后求平均结果，可指定 `--num-runs`：
+
+```bash
+python evaluation.py --out eval_plots --num-runs 5
+```
+平均指标会写入 `average_metrics.json`，并在输出目录生成对应的柱状图。
+
 
 ### English Overview
 
