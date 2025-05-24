@@ -41,16 +41,16 @@ def main():
         candidate_houses = houses
 
     graph = build_graph(candidate_houses, schools, hospitals)
-    embeddings = train_gnn(graph, embedding_dim=16, epochs=50)
+    embeddings = train_gnn(graph, embedding_dim=32, epochs=100)
     for h in candidate_houses:
         hid = h['id']
         if hid < len(embeddings):
             h['embedding'] = embeddings[hid]
         else:
-            h['embedding'] = [0.0] * 16
+            h['embedding'] = [0.0] * 32
 
-    ranker = RLRanker(criteria, preferences, state_dim=16)
-    ranker.train(candidate_houses, episodes=50)
+    ranker = RLRanker(criteria, preferences, state_dim=32)
+    ranker.train(candidate_houses, episodes=100)
     ranked = ranker.rank(candidate_houses)
 
     scored = []

@@ -43,11 +43,11 @@ class ReplayBuffer:
 
 
 class DQNAgent:
-    def __init__(self, state_dim: int, hidden_dim: int = 64, lr: float = 1e-3,
-                 gamma: float = 0.99, epsilon_start: float = 0.9,
+    def __init__(self, state_dim: int, hidden_dim: int = 64, lr: float = 5e-4,
+                 gamma: float = 0.99, epsilon_start: float = 1.0,
                  epsilon_end: float = 0.05, epsilon_decay: float = 0.995,
                  buffer_size: int = 10000, batch_size: int = 32,
-                 target_update: int = 10):
+                 target_update: int = 10, double_dqn: bool = True):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.policy_net = QNetwork(state_dim, hidden_dim).to(self.device)
         self.target_net = QNetwork(state_dim, hidden_dim).to(self.device)
@@ -61,6 +61,7 @@ class DQNAgent:
         self.target_update = target_update
         self.memory = ReplayBuffer(buffer_size)
         self.steps = 0
+        self.double_dqn = double_dqn
 
     def select_action(self, state: torch.Tensor) -> int:
         self.epsilon = max(self.epsilon_end, self.epsilon * self.epsilon_decay)
@@ -85,7 +86,11 @@ class DQNAgent:
 
         q_values = self.policy_net(states).gather(1, actions.unsqueeze(1)).squeeze()
         with torch.no_grad():
-            next_q = self.target_net(next_states).max(1)[0]
+            if self.double_dqn:
+                next_actions = self.policy_net(next_states).argmax(1)
+                next_q = self.target_net(next_states).gather(1, next_actions.unsqueeze(1)).squeeze()
+            else:
+                next_q = self.target_net(next_states).max(1)[0]
         target = rewards + (1 - dones) * self.gamma * next_q
         loss = nn.functional.mse_loss(q_values, target)
         self.optimizer.zero_grad()
@@ -101,10 +106,17 @@ class RLRanker:
 
     def __init__(self, criteria: dict, preferences: dict, state_dim: int):
         self.criteria = criteria
-        self.weights = preferences.get('weights', {})
-        self.agent = DQNAgent(state_dim)
+        self.weights = preferences.get('weights', {}).copy()
+        if 'hospital_nearby' in self.weights:
+            self.weights['hospital_nearby'] *= 1.2
+        eps_start = preferences.get('epsilon_start', 1.0)
+        eps_end = preferences.get('epsilon_end', 0.05)
+        self.agent = DQNAgent(state_dim, lr=5e-4,
+                              epsilon_start=eps_start,
+                              epsilon_end=eps_end,
+                              double_dqn=True)
 
-    def train(self, houses: List[dict], episodes: int = 50, verbose: bool = False) -> list:
+    def train(self, houses: List[dict], episodes: int = 100, verbose: bool = False) -> list:
         """训练 DQN 并返回每个 episode 的累积奖励"""
         episode_rewards = []
         for ep in range(episodes):
