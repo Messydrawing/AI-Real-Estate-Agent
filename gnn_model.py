@@ -18,7 +18,7 @@ class HouseGCN(nn.Module):
         return x
 
 
-def train_gnn(graph, embedding_dim: int = 16, epochs: int = 100) -> list:
+def train_gnn(graph, embedding_dim: int = 32, epochs: int = 100) -> list:
     """在异构图上训练GCN模型并返回房产嵌入
     每个epoch打印一次进度
     """
@@ -72,7 +72,7 @@ def train_gnn(graph, embedding_dim: int = 16, epochs: int = 100) -> list:
     edge_weight = torch.tensor(weights, dtype=torch.float) if edges else torch.empty((0,), dtype=torch.float)
 
     input_dim = features.size(1)
-    model = HouseGCN(input_dim, 16, embedding_dim)
+    model = HouseGCN(input_dim, 32, embedding_dim)
     optimizer = optim.Adam(model.parameters(), lr=0.01)
 
     model.train()

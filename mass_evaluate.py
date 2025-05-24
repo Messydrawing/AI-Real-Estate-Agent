@@ -6,12 +6,12 @@ import matplotlib.pyplot as plt
 import torch
 
 from data_loader import load_houses, load_facilities, filter_houses
-from utils import compute_statistics, normalize_features, rank_properties, calculate_score
-from evolutionary_optimizer import optimize_with_hybrid
+from utils import compute_statistics, normalize_features, rank_properties
+from evolutionary_optimizer import EvolutionaryOptimizer, optimize_with_hybrid
 from rl_agent import RLRanker
 from graph_builder import build_graph
 from gnn_model import train_gnn
-from evaluation import evaluate_ranking
+from evaluation import evaluate_ranking, prepare_simple_embeddings, plot_metric_bars
 
 torch.set_num_threads(8)
 os.environ.setdefault("OMP_NUM_THREADS", "8")
@@ -51,23 +51,43 @@ def evaluate_one(all_houses, schools, hospitals, weights, criteria):
     stats = compute_statistics(houses)
     normalize_features(houses, stats)
 
+    evo = EvolutionaryOptimizer(criteria)
+
     weighted_ranked = [h for h, _ in rank_properties(houses, criteria, weights)]
     ndcg_w, map_w = evaluate_ranking(weighted_ranked, houses, criteria, weights)
+    hv_w = evo.compute_hypervolume(weighted_ranked[:20])
+
+    prepare_simple_embeddings(houses)
+    rl_agent = RLRanker(criteria, {'weights': weights}, state_dim=4)
+    rl_agent.train(houses, episodes=50)
+    rl_ranked = rl_agent.rank(houses)
+    ndcg_rl, map_rl = evaluate_ranking(rl_ranked, houses, criteria, weights)
+    hv_rl = evo.compute_hypervolume(rl_ranked[:20])
+
+    nsga_front = evo.optimize_nsga2(houses)
+    ndcg_nsga, map_nsga = evaluate_ranking(nsga_front, houses, criteria, weights)
+    hv_nsga = evo.compute_hypervolume(nsga_front)
 
     hybrid_front = optimize_with_hybrid(houses, criteria)
     if not hybrid_front:
         hybrid_front = houses
     graph = build_graph(hybrid_front, schools, hospitals)
-    embeddings = train_gnn(graph, embedding_dim=16, epochs=20)
+    embeddings = train_gnn(graph, embedding_dim=32, epochs=50)
     for h in hybrid_front:
         hid = h['id']
-        h['embedding'] = embeddings[hid] if hid < len(embeddings) else [0.0] * 16
-    ranker = RLRanker(criteria, {'weights': weights}, state_dim=16)
-    ranker.train(hybrid_front, episodes=20)
+        h['embedding'] = embeddings[hid] if hid < len(embeddings) else [0.0] * 32
+    ranker = RLRanker(criteria, {'weights': weights}, state_dim=32)
+    ranker.train(hybrid_front, episodes=50)
     hybrid_ranked = ranker.rank(hybrid_front)
     ndcg_h, map_h = evaluate_ranking(hybrid_ranked, houses, criteria, weights)
-    return {'weighted': {'ndcg': ndcg_w, 'map': map_w},
-            'hybrid': {'ndcg': ndcg_h, 'map': map_h}}
+    hv_h = evo.compute_hypervolume(hybrid_front)
+
+    return {
+        'weighted': {'ndcg': ndcg_w, 'map': map_w, 'hv': hv_w},
+        'rl_no_gnn': {'ndcg': ndcg_rl, 'map': map_rl, 'hv': hv_rl},
+        'nsga2': {'ndcg': ndcg_nsga, 'map': map_nsga, 'hv': hv_nsga},
+        'hybrid': {'ndcg': ndcg_h, 'map': map_h, 'hv': hv_h}
+    }
 
 
 def main():
@@ -87,34 +107,23 @@ def main():
         print('No valid evaluations generated')
         return
 
-    avg = {
-        'weighted': {
-            'ndcg': float(np.mean([r['weighted']['ndcg'] for r in results])),
-            'map': float(np.mean([r['weighted']['map'] for r in results]))
-        },
-        'hybrid': {
-            'ndcg': float(np.mean([r['hybrid']['ndcg'] for r in results])),
-            'map': float(np.mean([r['hybrid']['map'] for r in results]))
+    methods = ['weighted', 'rl_no_gnn', 'nsga2', 'hybrid']
+    avg = {}
+    for m in methods:
+        avg[m] = {
+            'ndcg': float(np.mean([r[m]['ndcg'] for r in results])),
+            'map': float(np.mean([r[m]['map'] for r in results])),
+            'hv': float(np.mean([r[m]['hv'] for r in results]))
         }
-    }
 
     with open('random_eval_summary.json', 'w', encoding='utf-8') as f:
         json.dump({'average_metrics': avg, 'samples': len(results)}, f,
                   ensure_ascii=False, indent=4)
 
-    labels = ['weighted', 'hybrid']
-    ndcg_vals = [avg['weighted']['ndcg'], avg['hybrid']['ndcg']]
-    map_vals = [avg['weighted']['map'], avg['hybrid']['map']]
-    x = np.arange(len(labels))
-    width = 0.35
-    plt.figure()
-    plt.bar(x - width/2, ndcg_vals, width, label='NDCG')
-    plt.bar(x + width/2, map_vals, width, label='MAP')
-    plt.xticks(x, labels)
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig('random_eval_bar.png')
-    print('Saved random_eval_summary.json and random_eval_bar.png')
+    plot_metric_bars(avg, 'ndcg', 'random_ndcg_bar.png')
+    plot_metric_bars(avg, 'map', 'random_map_bar.png')
+    plot_metric_bars(avg, 'hv', 'random_hv_bar.png')
+    print('Saved random_eval_summary.json and metric bar charts')
 
 
 if __name__ == '__main__':
