@@ -19,12 +19,12 @@ def run_pipeline():
     if not candidates:
         candidates = houses
     graph = build_graph(candidates, schools, hospitals)
-    embeddings = train_gnn(graph, embedding_dim=16, epochs=50)
+    embeddings = train_gnn(graph, embedding_dim=32, epochs=100)
     for h in candidates:
         hid = h['id']
         h['embedding'] = embeddings[hid] if hid < len(embeddings) else [0.0] * 16
-    ranker = RLRanker(criteria, prefs, state_dim=16)
-    ranker.train(candidates, episodes=50, verbose=True)
+    ranker = RLRanker(criteria, prefs, state_dim=32)
+    ranker.train(candidates, episodes=100, verbose=True)
     ranked = ranker.rank(candidates)[:5]
     for h in ranked:
         score = calculate_score(h, criteria, prefs.get('weights', {}))
