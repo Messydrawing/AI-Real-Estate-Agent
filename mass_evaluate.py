@@ -58,12 +58,12 @@ def evaluate_one(all_houses, schools, hospitals, weights, criteria):
     if not hybrid_front:
         hybrid_front = houses
     graph = build_graph(hybrid_front, schools, hospitals)
-    embeddings = train_gnn(graph, embedding_dim=16, epochs=20)
+    embeddings = train_gnn(graph, embedding_dim=32, epochs=50)
     for h in hybrid_front:
         hid = h['id']
         h['embedding'] = embeddings[hid] if hid < len(embeddings) else [0.0] * 16
-    ranker = RLRanker(criteria, {'weights': weights}, state_dim=16)
-    ranker.train(hybrid_front, episodes=20)
+    ranker = RLRanker(criteria, {'weights': weights}, state_dim=32)
+    ranker.train(hybrid_front, episodes=50)
     hybrid_ranked = ranker.rank(hybrid_front)
     ndcg_h, map_h = evaluate_ranking(hybrid_ranked, houses, criteria, weights)
     return {'weighted': {'ndcg': ndcg_w, 'map': map_w},

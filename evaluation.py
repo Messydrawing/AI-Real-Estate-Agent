@@ -46,9 +46,9 @@ def evaluate_ranking(ranked, all_houses, criteria, weights, k=10):
     return ndcg, m_ap
 
 
-def prepare_embeddings(houses, schools, hospitals, state_dim=16):
+def prepare_embeddings(houses, schools, hospitals, state_dim=32):
     graph = build_graph(houses, schools, hospitals)
-    embeddings = train_gnn(graph, embedding_dim=state_dim, epochs=50)
+    embeddings = train_gnn(graph, embedding_dim=state_dim, epochs=100)
     for h in houses:
         hid = h['id']
         h['embedding'] = embeddings[hid] if hid < len(embeddings) else [0.0] * state_dim
@@ -151,7 +151,7 @@ def run_evaluation(output_dir):
     # RL without GNN
     prepare_simple_embeddings(houses)
     rl_agent = RLRanker(criteria, prefs, state_dim=4)
-    rewards_rl = rl_agent.train(houses, episodes=50, verbose=True)
+    rewards_rl = rl_agent.train(houses, episodes=100, verbose=True)
     rl_ranked = rl_agent.rank(houses)
     ndcg_rl, map_rl = evaluate_ranking(rl_ranked, houses, criteria, weights)
 
@@ -177,8 +177,8 @@ def run_evaluation(output_dir):
     hybrid_front, hv_hist_hybrid = optimize_with_hybrid(
         houses, criteria, save_pareto_path=os.path.join(output_dir, 'hybrid_pareto.json'), track=True)
     prepare_embeddings(houses, schools, hospitals)
-    hybrid_agent = RLRanker(criteria, prefs, state_dim=16)
-    rewards_hybrid = hybrid_agent.train(houses, episodes=50, verbose=True)
+    hybrid_agent = RLRanker(criteria, prefs, state_dim=32)
+    rewards_hybrid = hybrid_agent.train(houses, episodes=100, verbose=True)
     hybrid_ranked = hybrid_agent.rank(houses)
     ndcg_hybrid, map_hybrid = evaluate_ranking(hybrid_ranked, houses, criteria, weights)
 
