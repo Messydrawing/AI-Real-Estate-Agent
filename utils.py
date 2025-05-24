@@ -170,3 +170,12 @@ def rank_properties(houses: list, criteria: dict, weights: dict, top_n: int = No
         return scored[:top_n]
     return scored
 
+
+def soft_geo_reweight(houses: list, criteria: dict, weights: dict, factor: float = 1.5, top_n: int | None = None) -> list:
+    """Softly reweight hospital/school importance before ranking"""
+    new_weights = weights.copy()
+    for k in ('hospital_nearby', 'school_nearby'):
+        if k in new_weights:
+            new_weights[k] = new_weights[k] * factor
+    return rank_properties(houses, criteria, new_weights, top_n=top_n)
+

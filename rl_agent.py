@@ -111,6 +111,8 @@ class RLRanker:
         eps_end = preferences.get('epsilon_end', 0.05)
         eps_decay = preferences.get('epsilon_decay', 0.995)
         self.diversity_weight = preferences.get('diversity_weight', 0.1)
+        self.geo_boost = preferences.get('geo_boost', 1.0)
+        self.geo_penalty = preferences.get('geo_penalty', 0.0)
         self.agent = DQNAgent(state_dim, lr=5e-4,
                               epsilon_start=eps_start,
                               epsilon_end=eps_end,
@@ -124,15 +126,31 @@ class RLRanker:
             total = 0.0
             visited = set()
             random.shuffle(houses)
+            boosted = self.weights.copy()
+            for k in ('hospital_nearby', 'school_nearby'):
+                if k in boosted:
+                    boosted[k] *= self.geo_boost
             for i, house in enumerate(houses):
                 state = torch.tensor(house['embedding'], dtype=torch.float)
                 action = self.agent.select_action(state)
-                base = calculate_score(house, self.criteria, self.weights) if action == 1 else 0.0
+                base = calculate_score(house, self.criteria, boosted) if action == 1 else 0.0
                 bonus = 0.0
                 if action == 1 and house['id'] not in visited:
                     bonus = self.diversity_weight * (1.0 - len(visited) / len(houses))
                     visited.add(house['id'])
-                reward = base + bonus
+                penalty = 0.0
+                if action == 1 and self.geo_penalty > 0:
+                    if self.criteria.get('hospital_nearby'):
+                        dist = house.get('distance_to_nearest_hospital', float('inf'))
+                        max_d = self.criteria.get('hospital_nearby_max_distance', 5.0)
+                        if dist > max_d:
+                            penalty -= self.geo_penalty
+                    if self.criteria.get('school_nearby'):
+                        dist = house.get('distance_to_nearest_school', float('inf'))
+                        max_d = self.criteria.get('school_nearby_max_distance', 5.0)
+                        if dist > max_d:
+                            penalty -= self.geo_penalty
+                reward = base + bonus + penalty
                 done = i == len(houses) - 1
                 next_state = torch.tensor(houses[(i + 1) % len(houses)]['embedding'], dtype=torch.float)
                 self.agent.store(state, action, reward, next_state, float(done))
