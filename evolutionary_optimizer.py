@@ -1,6 +1,8 @@
 import random
 import json
 
+from utils import rank_properties
+
 import matplotlib.pyplot as plt
 
 
@@ -174,4 +176,20 @@ def optimize_with_hybrid(houses: list, criteria: dict, generations: int = 50, po
     if save_pareto_path:
         optimizer.export_front_points(front, save_pareto_path)
     return (front, history) if track else front
+
+
+def rank_by_pareto_layers(houses: list, criteria: dict, weights: dict, top_n: int = 10) -> list:
+    """按照帕累托层级进行排序, 每层内部按加权得分排序"""
+    optimizer = EvolutionaryOptimizer(criteria)
+    remaining = houses.copy()
+    ranked_list = []
+    while remaining and len(ranked_list) < top_n:
+        front = optimizer.find_pareto_front(remaining)
+        scored_front = rank_properties(front, criteria, weights)
+        for house, _ in scored_front:
+            ranked_list.append(house)
+            if len(ranked_list) >= top_n:
+                break
+        remaining = [h for h in remaining if h not in front]
+    return ranked_list
 
