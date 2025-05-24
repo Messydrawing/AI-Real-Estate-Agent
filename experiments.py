@@ -7,9 +7,9 @@ from rl_agent import RLRanker
 from utils import rank_properties, calculate_score
 
 
-def prepare_embeddings(houses, schools, hospitals, state_dim=16):
+def prepare_embeddings(houses, schools, hospitals, state_dim=32):
     graph = build_graph(houses, schools, hospitals)
-    embeddings = train_gnn(graph, embedding_dim=state_dim, epochs=50)
+    embeddings = train_gnn(graph, embedding_dim=state_dim, epochs=100)
     for h in houses:
         hid = h['id']
         if hid < len(embeddings):
@@ -55,8 +55,8 @@ def rl_only():
         'updated_criteria.json'
     )
     prepare_embeddings(houses, schools, hospitals)
-    ranker = RLRanker(criteria, prefs, state_dim=16)
-    ranker.train(houses, episodes=50, verbose=True)
+    ranker = RLRanker(criteria, prefs, state_dim=32)
+    ranker.train(houses, episodes=100, verbose=True)
     ranked = ranker.rank(houses)[:10]
     print('Top results (RL only):')
     for h in ranked:
@@ -75,8 +75,8 @@ def hybrid():
     if not candidates:
         candidates = houses
     prepare_embeddings(candidates, schools, hospitals)
-    ranker = RLRanker(criteria, prefs, state_dim=16)
-    ranker.train(candidates, episodes=50, verbose=True)
+    ranker = RLRanker(criteria, prefs, state_dim=32)
+    ranker.train(candidates, episodes=100, verbose=True)
     ranked = ranker.rank(candidates)[:10]
     print('Top results (hybrid):')
     for h in ranked:

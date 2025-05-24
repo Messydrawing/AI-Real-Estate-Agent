@@ -5,8 +5,9 @@
         "bathrooms": 0.5,
         "area": 0.5,
         "house_type": 0.3125,
-        "hospital_nearby": 0.390625,
-        "school_nearby": 0.390625
+        "hospital_nearby": 0.6,
+        "school_nearby": 0.6
     },
-    "epsilon": 0.05
+    "epsilon_end": 0.05,
+    "epsilon_start": 1.0
 }
