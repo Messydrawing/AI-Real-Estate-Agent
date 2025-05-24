@@ -2,6 +2,7 @@ import os
 import json
 import math
 import argparse
+import random
 import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
@@ -10,8 +11,8 @@ import torch
 torch.set_num_threads(8)
 os.environ.setdefault("OMP_NUM_THREADS", "8")
 
-from data_loader import load_data
-from utils import calculate_score, rank_properties
+from data_loader import load_data, load_houses, load_facilities
+from utils import calculate_score, rank_properties, compute_statistics
 from evolutionary_optimizer import EvolutionaryOptimizer, optimize_with_hybrid
 from rl_agent import RLRanker
 from graph_builder import build_graph
@@ -134,7 +135,35 @@ def plot_pareto_3d(front, obj_keys, path):
     plt.close()
 
 
-def run_evaluation(output_dir):
+def generate_random_prefs(stats, house_types):
+    weights = {
+        'price': random.random(),
+        'bedrooms': random.random(),
+        'bathrooms': random.random(),
+        'area': random.random(),
+        'house_type': random.random(),
+        'hospital_nearby': random.random(),
+        'school_nearby': random.random()
+    }
+    criteria = {
+        'price': sorted(random.sample([stats['price'][0], stats['price'][1],
+                                      random.uniform(stats['price'][0], stats['price'][1])], 2)),
+        'bedrooms': sorted(random.sample([stats['bedrooms'][0], stats['bedrooms'][1],
+                                         random.uniform(stats['bedrooms'][0], stats['bedrooms'][1])], 2)),
+        'bathrooms': sorted(random.sample([stats['bathrooms'][0], stats['bathrooms'][1],
+                                          random.uniform(stats['bathrooms'][0], stats['bathrooms'][1])], 2)),
+    }
+    if 'area' in stats:
+        criteria['area'] = sorted(random.sample([stats['area'][0], stats['area'][1],
+                                                 random.uniform(stats['area'][0], stats['area'][1])], 2))
+    criteria['house_type'] = random.choice(list(house_types)) if house_types else ''
+    criteria['hospital_nearby'] = random.choice([True, False])
+    criteria['school_nearby'] = random.choice([True, False])
+    return weights, criteria
+
+
+def run_evaluation(output_dir, weights_override=None, criteria_override=None,
+                   prefs_override=None):
     os.makedirs(output_dir, exist_ok=True)
     houses, schools, hospitals, prefs, criteria = load_data(
         'updated_houses_with_price_history.json',
@@ -142,6 +171,12 @@ def run_evaluation(output_dir):
         'user_preferences.json',
         'updated_criteria.json'
     )
+    if prefs_override:
+        prefs.update(prefs_override)
+    if weights_override is not None:
+        prefs['weights'] = weights_override
+    if criteria_override:
+        criteria.update(criteria_override)
     weights = prefs.get('weights', {})
 
     # Weighted baseline
@@ -233,12 +268,46 @@ def run_evaluation(output_dir):
     with open(os.path.join(output_dir, 'metrics.json'), 'w', encoding='utf-8') as f:
         json.dump(metrics, f, ensure_ascii=False, indent=4)
 
+    return metrics
+
 
 def main():
     parser = argparse.ArgumentParser(description='Evaluate all methods')
     parser.add_argument('--out', default='eval_plots', help='Output directory')
+    parser.add_argument('--num-runs', type=int, default=1,
+                        help='Number of random preference runs')
     args = parser.parse_args()
-    run_evaluation(args.out)
+    if args.num_runs <= 1:
+        run_evaluation(args.out)
+    else:
+        all_houses = load_houses('updated_houses_with_price_history.json')
+        stats_all = compute_statistics(all_houses)
+        house_types = set(h.get('house_type', '') for h in all_houses
+                          if h.get('house_type'))
+        metrics_list = []
+        for i in range(args.num_runs):
+            w, c = generate_random_prefs(stats_all, house_types)
+            m = run_evaluation(os.path.join(args.out, f'run_{i+1}'),
+                               weights_override=w,
+                               criteria_override=c,
+                               prefs_override={'weights': w})
+            metrics_list.append(m)
+        methods = metrics_list[0].keys() if metrics_list else []
+        avg = {}
+        for m in methods:
+            avg[m] = {
+                'ndcg': float(np.mean([r[m]['ndcg'] for r in metrics_list])),
+                'map': float(np.mean([r[m]['map'] for r in metrics_list])),
+                'hv': float(np.mean([r[m]['hv'] for r in metrics_list]))
+            }
+        os.makedirs(args.out, exist_ok=True)
+        with open(os.path.join(args.out, 'average_metrics.json'), 'w',
+                  encoding='utf-8') as f:
+            json.dump({'metrics': avg, 'runs': len(metrics_list)}, f,
+                      ensure_ascii=False, indent=4)
+        plot_metric_bars(avg, 'ndcg', os.path.join(args.out, 'avg_ndcg_bar.png'))
+        plot_metric_bars(avg, 'map', os.path.join(args.out, 'avg_map_bar.png'))
+        plot_metric_bars(avg, 'hv', os.path.join(args.out, 'avg_hv_bar.png'))
 
 
 if __name__ == '__main__':
