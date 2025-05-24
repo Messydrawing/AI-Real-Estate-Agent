@@ -19,7 +19,9 @@ class HouseGCN(nn.Module):
 
 
 def train_gnn(graph, embedding_dim: int = 16, epochs: int = 100) -> list:
-    """在异构图上训练GCN模型并返回房产嵌入"""
+    """在异构图上训练GCN模型并返回房产嵌入
+    每个epoch打印一次进度
+    """
     house_ids = [int(n.split('_')[1]) for n, d in graph.nodes(data=True) if d.get('node_type') == 'house']
     house_count = max(house_ids) + 1 if house_ids else 0
     school_nodes = [n for n, d in graph.nodes(data=True) if d.get('facility_type') == 'school']
@@ -74,7 +76,7 @@ def train_gnn(graph, embedding_dim: int = 16, epochs: int = 100) -> list:
     optimizer = optim.Adam(model.parameters(), lr=0.01)
 
     model.train()
-    for _ in range(epochs):
+    for epoch in range(epochs):
         optimizer.zero_grad()
         embed = model(features, edge_index, edge_weight)
         pos, neg = [], []
@@ -106,6 +108,7 @@ def train_gnn(graph, embedding_dim: int = 16, epochs: int = 100) -> list:
             loss += loss_neg
         loss.backward()
         optimizer.step()
+        print(f'GNN training epoch {epoch + 1}/{epochs} completed')
 
     model.eval()
     with torch.no_grad():
