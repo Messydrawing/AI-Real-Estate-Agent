@@ -5,6 +5,10 @@ import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+import torch
+
+DEFAULT_THREADS = int(os.environ.get("OMP_NUM_THREADS", "8"))
+torch.set_num_threads(DEFAULT_THREADS)
 
 from data_loader import load_data
 from utils import calculate_score, rank_properties
@@ -233,7 +237,11 @@ def run_evaluation(output_dir):
 def main():
     parser = argparse.ArgumentParser(description='Evaluate all methods')
     parser.add_argument('--out', default='eval_plots', help='Output directory')
+    parser.add_argument('--threads', type=int, default=DEFAULT_THREADS,
+                        help='Number of CPU threads to use')
     args = parser.parse_args()
+    torch.set_num_threads(args.threads)
+    os.environ["OMP_NUM_THREADS"] = str(args.threads)
     run_evaluation(args.out)
 
 

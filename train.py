@@ -1,6 +1,11 @@
 import argparse
 import json
 from pprint import pprint
+import os
+import torch
+
+torch.set_num_threads(8)
+os.environ.setdefault("OMP_NUM_THREADS", "8")
 
 from data_loader import load_data, load_user_preferences, load_criteria
 from graph_builder import build_graph

@@ -86,7 +86,13 @@ python interactive_demo.py --nl "希望房子更大并靠近医院"
 使用 `evaluation.py` 可一次性运行四种方法并生成评测指标及训练曲线到指定目录：
 
 ```bash
-python evaluation.py --out eval_plots
+python evaluation.py --out eval_plots --threads 8
+```
+
+如需批量生成随机用户需求并比较加权算法与混合模型，可运行：
+
+```bash
+python mass_evaluate.py --workers 8
 ```
 
 
