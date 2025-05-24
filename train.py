@@ -4,9 +4,6 @@ from pprint import pprint
 import os
 import torch
 
-torch.set_num_threads(8)
-os.environ.setdefault("OMP_NUM_THREADS", "8")
-
 from data_loader import load_data, load_user_preferences, load_criteria
 from graph_builder import build_graph
 from gnn_model import train_gnn
@@ -18,7 +15,12 @@ from utils import parse_natural_language, apply_adjustments, calculate_score
 def main():
     parser = argparse.ArgumentParser(description="Train real estate recommender")
     parser.add_argument('--nl', type=str, help='\u81ea\u7136\u8bed\u8a00\u504f\u597d\u63cf\u8ff0')
+    parser.add_argument('--threads', type=int, default=8,
+                        help='Number of CPU threads to use')
     args = parser.parse_args()
+
+    torch.set_num_threads(args.threads)
+    os.environ["OMP_NUM_THREADS"] = str(args.threads)
 
     if args.nl:
         prefs = load_user_preferences('user_preferences.json')

@@ -58,8 +58,9 @@
 
 1. 推荐使用提供的一键脚本：`./run.sh`。脚本会自动安装依赖并执行训练，可将自然语言描述作为参数传入：
    `./run.sh --nl "希望房子便宜并靠近学校"`
-2. 若已安装好依赖，也可直接运行：`python train.py`
-3. 训练完成后可在命令行查看推荐结果或在生成的日志中获取模型指标。
+2. 若已安装好依赖，也可直接运行：`python train.py [--threads N]`
+3. 可通过 `--threads` 指定 CPU 线程数，默认 8。
+4. 训练完成后可在命令行查看推荐结果或在生成的日志中获取模型指标。
 
 ### 复现论文中的对比实验
 
@@ -86,13 +87,13 @@ python interactive_demo.py --nl "希望房子更大并靠近医院"
 使用 `evaluation.py` 可一次性运行四种方法并生成评测指标及训练曲线到指定目录：
 
 ```bash
-python evaluation.py --out eval_plots
+python evaluation.py --out eval_plots [--threads N]
 ```
 
 
 ### English Overview
 
-This repository implements a multi-objective real estate recommender combining GNN, reinforcement learning and evolutionary search. Use `run.sh` or `python train.py` to train the full pipeline. `experiments.py` reproduces ablation studies and exports Pareto front data for visualization. `interactive_demo.py` demonstrates dynamic preference updating via natural language.
+This repository implements a multi-objective real estate recommender combining GNN, reinforcement learning and evolutionary search. Use `run.sh` or `python train.py [--threads N]` to train the full pipeline. `experiments.py` reproduces ablation studies and exports Pareto front data for visualization. `interactive_demo.py` demonstrates dynamic preference updating via natural language.
 
 ## 数据来源与授权
 
