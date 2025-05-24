@@ -7,15 +7,27 @@ from rl_agent import RLRanker
 from utils import rank_properties, calculate_score
 
 
-def prepare_embeddings(houses, schools, hospitals, state_dim=16):
+def prepare_embeddings(houses, schools, hospitals, state_dim=32):
+    """Prepare GNN embeddings and append normalized facility distances."""
     graph = build_graph(houses, schools, hospitals)
-    embeddings = train_gnn(graph, embedding_dim=state_dim, epochs=50)
+    embeddings = train_gnn(graph, embedding_dim=state_dim, epochs=100)
+
+    max_h = max((h.get('distance_to_nearest_hospital', 0.0)
+                 for h in houses if h.get('distance_to_nearest_hospital') is not None),
+                default=1.0)
+    max_s = max((h.get('distance_to_nearest_school', 0.0)
+                 for h in houses if h.get('distance_to_nearest_school') is not None),
+                default=1.0)
+
     for h in houses:
         hid = h['id']
-        if hid < len(embeddings):
-            h['embedding'] = embeddings[hid]
-        else:
-            h['embedding'] = [0.0] * state_dim
+        base = embeddings[hid] if hid < len(embeddings) else [0.0] * state_dim
+        dh = h.get('distance_to_nearest_hospital')
+        ds = h.get('distance_to_nearest_school')
+        dh_norm = 1 - dh / max_h if dh is not None else 0.0
+        ds_norm = 1 - ds / max_s if ds is not None else 0.0
+        h['embedding'] = base + [dh_norm, ds_norm]
+    return state_dim + 2
 
 
 def weighted_only():
@@ -54,9 +66,9 @@ def rl_only():
         'user_preferences.json',
         'updated_criteria.json'
     )
-    prepare_embeddings(houses, schools, hospitals)
-    ranker = RLRanker(criteria, prefs, state_dim=16)
-    ranker.train(houses, episodes=50, verbose=True)
+    dim = prepare_embeddings(houses, schools, hospitals)
+    ranker = RLRanker(criteria, prefs, state_dim=dim)
+    ranker.train(houses, episodes=200, verbose=True)
     ranked = ranker.rank(houses)[:10]
     print('Top results (RL only):')
     for h in ranked:
@@ -74,9 +86,9 @@ def hybrid():
     candidates = optimize_with_hybrid(houses, criteria, save_pareto_path='hybrid_pareto.json')
     if not candidates:
         candidates = houses
-    prepare_embeddings(candidates, schools, hospitals)
-    ranker = RLRanker(criteria, prefs, state_dim=16)
-    ranker.train(candidates, episodes=50, verbose=True)
+    dim = prepare_embeddings(candidates, schools, hospitals)
+    ranker = RLRanker(criteria, prefs, state_dim=dim)
+    ranker.train(candidates, episodes=200, verbose=True)
     ranked = ranker.rank(candidates)[:10]
     print('Top results (hybrid):')
     for h in ranked:
